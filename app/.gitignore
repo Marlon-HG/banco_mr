@@ -1,0 +1,24 @@
+# Entornos virtuales
+venv/
+.venv/
+env/
+.env/
+
+# Caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Archivos de sistema
+.DS_Store
+
+# Logs
+*.log
+
+# Dependencias
+pip-wheel-metadata/
+*.egg-info/
+
+# Ajustes de editor
+.idea/
+.vscode/
