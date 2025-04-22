@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "app/main.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "app/main.py"
+    }
+  ],
+  "env": {
+    "DATABASE_URL": "@DATABASE_URL",
+    "SECRET_KEY": "@SECRET_KEY",
+    "SMTP_USER": "@SMTP_USER",
+    "SMTP_PASSWORD": "@SMTP_PASSWORD"
+  }
+}
