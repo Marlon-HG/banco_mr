@@ -112,7 +112,7 @@ def register(user: schemas.UserRegister, db: Session = Depends(get_db)):
         "lo antes posible.\n\n"
         "Cordialmente,\n"
         "Equipo de Banco M&R\n"
-        "www.bancomarlon.com"
+        "https://front-banco-mr.vercel.app/landing/inicio"
     )
     try:
         email_utils.send_email(subject, user.cliente.correo, body)
