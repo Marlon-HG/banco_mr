@@ -194,7 +194,7 @@ def password_reset_request(data: schemas.PasswordResetRequest, db: Session = Dep
 
     # Enviar un correo con las instrucciones y el token
     subject = "Solicitud de Restablecimiento de Contraseña - Banco M&R"
-    reset_link = f"https://tu-dominio.com/reset-password?token={reset_token}"
+    reset_link = f"https://front-banco-mr.vercel.app/auth/recupera?token={reset_token}"
     body = (
         f"Estimado usuario,\n\n"
         "Hemos recibido una solicitud para restablecer la contraseña de su cuenta en Banco M&R.\n"
