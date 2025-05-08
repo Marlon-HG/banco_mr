@@ -205,7 +205,23 @@ def listar_transacciones(
         (models.Transaccion.idCuentaDestino == cuenta.idCuenta)
     ).order_by(models.Transaccion.fecha.desc()).all()
 
-    return transacciones
+    # Crear diccionario de cuentas para mapear ID -> númeroCuenta
+    cuentas = db.query(models.Cuenta).all()
+    cuentas_dict = {c.idCuenta: c.numeroCuenta for c in cuentas}
+
+    return [
+        {
+            "numeroDocumento": t.numeroDocumento,
+            "fecha": t.fecha,
+            "cuentaOrigen": cuentas_dict.get(t.idCuentaOrigen),
+            "cuentaDestino": cuentas_dict.get(t.idCuentaDestino),
+            "tipoTransaccion": t.tipoTransaccion.nombre,
+            "monto": float(t.monto),
+            "descripcion": t.descripcion
+        }
+        for t in transacciones
+    ]
+
 
 @router.get("/transacciones/mis")
 def listar_transacciones_cliente(

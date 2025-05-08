@@ -110,13 +110,10 @@ class MonedaOut(BaseModel):
         orm_mode = True
 
 class TransaccionOut(BaseModel):
-    numeroDocumento: str
+    numeroDocumento: Optional[str] = None
     fecha: datetime
-    idCuentaOrigen: Optional[int]
-    idCuentaDestino: Optional[int]
-    idTipoTransaccion: int
-    monto: Decimal
-    descripcion: Optional[str]
-
-    class Config:
-        orm_mode = True
+    cuentaOrigen: Optional[str] = None
+    cuentaDestino: Optional[str] = None
+    tipoTransaccion: str
+    monto: float
+    descripcion: Optional[str] = None
