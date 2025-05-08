@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import auth, cuentas, transacciones
+from app.routers import auth, cuentas, transacciones, prestamo
 
 app = FastAPI(
     title="API Banco - Seguridad y Gestión de Contraseñas",
@@ -23,7 +23,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(cuentas.router)
 app.include_router(transacciones.router)
-
+app.include_router(prestamo.router)
 @app.get("/")
 def read_root():
     return {"mensaje": "Bienvenido a la API del Banco"}

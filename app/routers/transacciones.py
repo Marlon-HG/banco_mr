@@ -1,17 +1,14 @@
 # app/routers/transacciones.py
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from datetime import datetime
-import secrets
+from decimal import Decimal
 
-from app import models, schemas, auth
+from app import models, schemas, auth, email_utils
 from app.database import SessionLocal
-from app.utils import generate_document_number, convert_currency  # Asegúrate de tener convert_currency
-
-from app import email_utils  # Importa el módulo de envío de correos
+from app.utils import generate_document_number, convert_currency
 
 router = APIRouter()
-
 
 def get_db():
     db = SessionLocal()
@@ -20,28 +17,31 @@ def get_db():
     finally:
         db.close()
 
-
 @router.post("/transacciones", status_code=status.HTTP_201_CREATED)
 def create_transaccion(
     transaccion_data: schemas.TransaccionCreate,
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user)
 ):
-    # Buscar la cuenta origen usando el número de cuenta (string)
+    usuario = db.query(models.Usuario).filter(
+        models.Usuario.username == current_user["username"]
+    ).first()
+
     cuenta_origen = db.query(models.Cuenta).filter(
         models.Cuenta.numeroCuenta == transaccion_data.idCuentaOrigen
     ).first()
     if not cuenta_origen:
         raise HTTPException(status_code=404, detail="Cuenta origen no encontrada")
 
-    # Verificar que la cuenta origen pertenezca al usuario autenticado
-    usuario = db.query(models.Usuario).filter(
-        models.Usuario.username == current_user["username"]
-    ).first()
-    if cuenta_origen.idCliente != usuario.idCliente:
+    # Validar permiso según tipo de transacción
+    if transaccion_data.idTipoTransaccion in [1, 2] and usuario.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo administradores pueden realizar depósitos o retiros")
+
+    if cuenta_origen.idCliente != usuario.idCliente and usuario.rol != "admin":
         raise HTTPException(status_code=403, detail="No tiene permiso para usar esta cuenta")
 
-    # Para transferencias se requiere cuenta destino usando su número de cuenta
+    # Validar cuenta destino para transferencia
+    cuenta_destino = None
     if transaccion_data.idTipoTransaccion == 3:
         if not transaccion_data.idCuentaDestino:
             raise HTTPException(status_code=400, detail="Para transferencia se requiere cuenta destino")
@@ -51,184 +51,195 @@ def create_transaccion(
         if not cuenta_destino:
             raise HTTPException(status_code=404, detail="Cuenta destino no encontrada")
 
-    # Generar el número de documento usando la moneda de la cuenta origen
+    monto = Decimal(str(transaccion_data.monto))
     numero_documento = generate_document_number(db, transaccion_data.idTipoTransaccion, cuenta_origen.idMoneda)
 
-    # Procesar según el tipo de transacción
     if transaccion_data.idTipoTransaccion == 1:  # Depósito
-        nuevo_saldo = float(cuenta_origen.saldo) + transaccion_data.monto
-        cuenta_origen.saldo = nuevo_saldo
+        cuenta_origen.saldo += monto
 
-        nueva_transaccion = models.Transaccion(
+        transaccion = models.Transaccion(
             numeroDocumento=numero_documento,
             idCuentaOrigen=cuenta_origen.idCuenta,
             idCuentaDestino=None,
-            idTipoTransaccion=transaccion_data.idTipoTransaccion,
-            monto=transaccion_data.monto,
+            idTipoTransaccion=1,
+            monto=monto,
             descripcion=transaccion_data.descripcion
         )
-        db.add(nueva_transaccion)
+        db.add(transaccion)
         db.commit()
-        db.refresh(nueva_transaccion)
+        db.refresh(transaccion)
 
-        nuevo_historial = models.Historial(
+        historial = models.Historial(
             idCuenta=cuenta_origen.idCuenta,
-            idTransaccion=nueva_transaccion.idTransaccion,
+            idTransaccion=transaccion.idTransaccion,
             numeroDocumento=numero_documento,
-            fecha=datetime.utcnow(),
-            monto=transaccion_data.monto,
-            saldo=nuevo_saldo
+            monto=monto,
+            saldo=cuenta_origen.saldo
         )
-        db.add(nuevo_historial)
+        db.add(historial)
         db.commit()
 
-        # Enviar notificación de depósito al cliente de la cuenta origen
-        cliente_origen = db.query(models.Cliente).filter(models.Cliente.idCliente == cuenta_origen.idCliente).first()
-        subject = "Notificación de Depósito - Banco M&R"
-        body = (
-            f"Estimado(a) {cliente_origen.primerNombre} {cliente_origen.primerApellido},\n\n"
-            f"Se ha realizado un DEPÓSITO en su cuenta {cuenta_origen.numeroCuenta}.\n\n"
-            "Detalles de la transacción:\n"
-            f"- Número de documento: {numero_documento}\n"
-            f"- Monto: {transaccion_data.monto}\n"
-            f"- Nuevo Saldo: {nuevo_saldo}\n"
-            f"- Fecha: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"- Descripción: {transaccion_data.descripcion}\n\n"
-            "Gracias por confiar en Banco M&R.\n\nAtentamente,\nEquipo Banco M&R"
+        cliente = db.query(models.Cliente).filter_by(idCliente=cuenta_origen.idCliente).first()
+        email_utils.send_email(
+            "Notificación de Depósito - Banco M&R",
+            cliente.correo,
+            f"Hola {cliente.primerNombre}, se ha realizado un depósito de Q{monto} en su cuenta {cuenta_origen.numeroCuenta}.\nDocumento: {numero_documento}"
         )
-        email_utils.send_email(subject, cliente_origen.correo, body)
 
-        return {"mensaje": "Depósito realizado exitosamente", "transaccion": nueva_transaccion}
+        return {"mensaje": "Depósito realizado exitosamente", "transaccion": transaccion}
 
     elif transaccion_data.idTipoTransaccion == 2:  # Retiro
-        if cuenta_origen.saldo < transaccion_data.monto:
+        if cuenta_origen.saldo < monto:
             raise HTTPException(status_code=400, detail="Saldo insuficiente")
-        nuevo_saldo = float(cuenta_origen.saldo) - transaccion_data.monto
-        cuenta_origen.saldo = nuevo_saldo
+        cuenta_origen.saldo -= monto
 
-        nueva_transaccion = models.Transaccion(
+        transaccion = models.Transaccion(
             numeroDocumento=numero_documento,
             idCuentaOrigen=cuenta_origen.idCuenta,
             idCuentaDestino=None,
-            idTipoTransaccion=transaccion_data.idTipoTransaccion,
-            monto=transaccion_data.monto,
+            idTipoTransaccion=2,
+            monto=monto,
             descripcion=transaccion_data.descripcion
         )
-        db.add(nueva_transaccion)
+        db.add(transaccion)
         db.commit()
-        db.refresh(nueva_transaccion)
+        db.refresh(transaccion)
 
-        nuevo_historial = models.Historial(
+        historial = models.Historial(
             idCuenta=cuenta_origen.idCuenta,
-            idTransaccion=nueva_transaccion.idTransaccion,
+            idTransaccion=transaccion.idTransaccion,
             numeroDocumento=numero_documento,
-            fecha=datetime.utcnow(),
-            monto=transaccion_data.monto,
-            saldo=nuevo_saldo
+            monto=monto,
+            saldo=cuenta_origen.saldo
         )
-        db.add(nuevo_historial)
+        db.add(historial)
         db.commit()
 
-        # Enviar notificación de retiro al cliente de la cuenta origen
-        cliente_origen = db.query(models.Cliente).filter(models.Cliente.idCliente == cuenta_origen.idCliente).first()
-        subject = "Notificación de Retiro - Banco M&R"
-        body = (
-            f"Estimado(a) {cliente_origen.primerNombre} {cliente_origen.primerApellido},\n\n"
-            f"Se ha realizado un RETIRO desde su cuenta {cuenta_origen.numeroCuenta}.\n\n"
-            "Detalles de la transacción:\n"
-            f"- Número de documento: {numero_documento}\n"
-            f"- Monto: {transaccion_data.monto}\n"
-            f"- Nuevo Saldo: {nuevo_saldo}\n"
-            f"- Fecha: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"- Descripción: {transaccion_data.descripcion}\n\n"
-            "Gracias por confiar en Banco M&R.\n\nAtentamente,\nEquipo Banco M&R"
+        cliente = db.query(models.Cliente).filter_by(idCliente=cuenta_origen.idCliente).first()
+        email_utils.send_email(
+            "Notificación de Retiro - Banco M&R",
+            cliente.correo,
+            f"Hola {cliente.primerNombre}, se ha realizado un retiro de Q{monto} en su cuenta {cuenta_origen.numeroCuenta}.\nDocumento: {numero_documento}"
         )
-        email_utils.send_email(subject, cliente_origen.correo, body)
 
-        return {"mensaje": "Retiro realizado exitosamente", "transaccion": nueva_transaccion}
+        return {"mensaje": "Retiro realizado exitosamente", "transaccion": transaccion}
 
     elif transaccion_data.idTipoTransaccion == 3:  # Transferencia
-        if cuenta_origen.saldo < transaccion_data.monto:
-            raise HTTPException(status_code=400, detail="Saldo insuficiente en la cuenta origen")
+        if cuenta_origen.saldo < monto:
+            raise HTTPException(status_code=400, detail="Saldo insuficiente")
 
-        # Si las monedas de origen y destino son distintas, realizar la conversión
         if cuenta_origen.idMoneda != cuenta_destino.idMoneda:
-            monto_convertido = convert_currency(transaccion_data.monto, cuenta_origen.idMoneda, cuenta_destino.idMoneda)
+            monto_convertido = convert_currency(monto, cuenta_origen.idMoneda, cuenta_destino.idMoneda)
         else:
-            monto_convertido = transaccion_data.monto
+            monto_convertido = monto
 
-        nuevo_saldo_origen = float(cuenta_origen.saldo) - transaccion_data.monto
-        cuenta_origen.saldo = nuevo_saldo_origen
+        cuenta_origen.saldo -= monto
+        cuenta_destino.saldo += monto_convertido
 
-        nuevo_saldo_destino = float(cuenta_destino.saldo) + monto_convertido
-        cuenta_destino.saldo = nuevo_saldo_destino
-
-        nueva_transaccion = models.Transaccion(
+        transaccion = models.Transaccion(
             numeroDocumento=numero_documento,
             idCuentaOrigen=cuenta_origen.idCuenta,
             idCuentaDestino=cuenta_destino.idCuenta,
-            idTipoTransaccion=transaccion_data.idTipoTransaccion,
-            monto=transaccion_data.monto,
+            idTipoTransaccion=3,
+            monto=monto,
             descripcion=transaccion_data.descripcion
         )
-        db.add(nueva_transaccion)
+        db.add(transaccion)
         db.commit()
-        db.refresh(nueva_transaccion)
+        db.refresh(transaccion)
 
         historial_origen = models.Historial(
             idCuenta=cuenta_origen.idCuenta,
-            idTransaccion=nueva_transaccion.idTransaccion,
+            idTransaccion=transaccion.idTransaccion,
             numeroDocumento=numero_documento,
-            fecha=datetime.utcnow(),
-            monto=transaccion_data.monto,
-            saldo=nuevo_saldo_origen
+            monto=monto,
+            saldo=cuenta_origen.saldo
         )
-        db.add(historial_origen)
-
         historial_destino = models.Historial(
             idCuenta=cuenta_destino.idCuenta,
-            idTransaccion=nueva_transaccion.idTransaccion,
+            idTransaccion=transaccion.idTransaccion,
             numeroDocumento=numero_documento,
-            fecha=datetime.utcnow(),
             monto=monto_convertido,
-            saldo=nuevo_saldo_destino
+            saldo=cuenta_destino.saldo
         )
-        db.add(historial_destino)
+        db.add_all([historial_origen, historial_destino])
         db.commit()
 
-        # Enviar notificación de transferencia al cliente de la cuenta origen
-        cliente_origen = db.query(models.Cliente).filter(models.Cliente.idCliente == cuenta_origen.idCliente).first()
-        subject_origen = "Notificación de Transferencia Saliente - Banco M&R"
-        body_origen = (
-            f"Estimado(a) {cliente_origen.primerNombre} {cliente_origen.primerApellido},\n\n"
-            f"Se ha realizado una TRANSFERENCIA desde su cuenta {cuenta_origen.numeroCuenta}.\n\n"
-            "Detalles de la transacción:\n"
-            f"- Número de documento: {numero_documento}\n"
-            f"- Monto debitado: {transaccion_data.monto}\n"
-            f"- Nuevo Saldo: {nuevo_saldo_origen}\n"
-            f"- Fecha: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"- Descripción: {transaccion_data.descripcion}\n\n"
-            "Gracias por confiar en Banco M&R.\n\nAtentamente,\nEquipo Banco M&R"
+        cliente_origen = db.query(models.Cliente).filter_by(idCliente=cuenta_origen.idCliente).first()
+        cliente_destino = db.query(models.Cliente).filter_by(idCliente=cuenta_destino.idCliente).first()
+
+        email_utils.send_email(
+            "Transferencia enviada - Banco M&R",
+            cliente_origen.correo,
+            f"Hola {cliente_origen.primerNombre}, has enviado Q{monto} desde tu cuenta {cuenta_origen.numeroCuenta}.\nDocumento: {numero_documento}"
         )
-        email_utils.send_email(subject_origen, cliente_origen.correo, body_origen)
-
-        # Enviar notificación a la cuenta destino
-        cliente_destino = db.query(models.Cliente).filter(models.Cliente.idCliente == cuenta_destino.idCliente).first()
-        subject_destino = "Notificación de Transferencia Entrante - Banco M&R"
-        body_destino = (
-            f"Estimado(a) {cliente_destino.primerNombre} {cliente_destino.primerApellido},\n\n"
-            f"Ha recibido una TRANSFERENCIA en su cuenta {cuenta_destino.numeroCuenta}.\n\n"
-            "Detalles de la transacción:\n"
-            f"- Número de documento: {numero_documento}\n"
-            f"- Monto acreditado: {monto_convertido}\n"
-            f"- Nuevo Saldo: {nuevo_saldo_destino}\n"
-            f"- Fecha: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}\n"
-            f"- Descripción: {transaccion_data.descripcion}\n\n"
-            "Gracias por confiar en Banco M&R.\n\nAtentamente,\nEquipo Banco M&R"
+        email_utils.send_email(
+            "Transferencia recibida - Banco M&R",
+            cliente_destino.correo,
+            f"Hola {cliente_destino.primerNombre}, has recibido Q{monto_convertido} en tu cuenta {cuenta_destino.numeroCuenta}.\nDocumento: {numero_documento}"
         )
-        email_utils.send_email(subject_destino, cliente_destino.correo, body_destino)
 
-        return {"mensaje": "Transferencia realizada exitosamente", "transaccion": nueva_transaccion}
+        return {"mensaje": "Transferencia realizada exitosamente", "transaccion": transaccion}
 
-    else:
-        raise HTTPException(status_code=400, detail="Tipo de transacción no válido")
+    raise HTTPException(status_code=400, detail="Tipo de transacción no válido")
+
+
+@router.get("/transacciones", response_model=list[schemas.TransaccionOut])
+def listar_transacciones(
+    numero_cuenta: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user)
+):
+    # Buscar cuenta por número
+    cuenta = db.query(models.Cuenta).filter_by(numeroCuenta=numero_cuenta).first()
+    if not cuenta:
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada")
+
+    # Verificar que la cuenta pertenezca al usuario
+    usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
+    if cuenta.idCliente != usuario.idCliente and usuario.rol != "admin":
+        raise HTTPException(status_code=403, detail="No tiene permisos para ver estas transacciones")
+
+    transacciones = db.query(models.Transaccion).filter(
+        (models.Transaccion.idCuentaOrigen == cuenta.idCuenta) |
+        (models.Transaccion.idCuentaDestino == cuenta.idCuenta)
+    ).order_by(models.Transaccion.fecha.desc()).all()
+
+    return transacciones
+
+@router.get("/transacciones/mis")
+def listar_transacciones_cliente(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user)
+):
+    # Obtener el usuario
+    usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
+    if not usuario:
+        raise HTTPException(status_code=403, detail="Usuario no válido")
+
+    # Obtener todas las cuentas del cliente
+    cuentas = db.query(models.Cuenta).filter_by(idCliente=usuario.idCliente).all()
+    cuentas_ids = [cuenta.idCuenta for cuenta in cuentas]
+
+    # Buscar transacciones donde la cuenta esté involucrada (origen o destino)
+    transacciones = db.query(models.Transaccion).filter(
+        (models.Transaccion.idCuentaOrigen.in_(cuentas_ids)) |
+        (models.Transaccion.idCuentaDestino.in_(cuentas_ids))
+    ).order_by(models.Transaccion.fecha.desc()).all()
+
+    resultados = []
+    for t in transacciones:
+        cuenta_origen = db.query(models.Cuenta).filter_by(idCuenta=t.idCuentaOrigen).first()
+        cuenta_destino = db.query(models.Cuenta).filter_by(idCuenta=t.idCuentaDestino).first()
+
+        resultados.append({
+            "numeroDocumento": t.numeroDocumento,
+            "fecha": t.fecha,
+            "numeroCuentaOrigen": cuenta_origen.numeroCuenta if cuenta_origen else None,
+            "numeroCuentaDestino": cuenta_destino.numeroCuenta if cuenta_destino else None,
+            "tipoTransaccion": t.tipoTransaccion.nombre,
+            "monto": float(t.monto),
+            "descripcion": t.descripcion
+        })
+
+    return resultados

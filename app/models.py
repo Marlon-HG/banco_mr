@@ -1,7 +1,10 @@
 # app/models.py
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, DECIMAL, TIMESTAMP, CheckConstraint
+from sqlalchemy import Column, Date, Numeric, Integer, String, Text, DateTime, ForeignKey, DECIMAL, TIMESTAMP, CheckConstraint
 from sqlalchemy.sql import func
 from app.database import Base
+from sqlalchemy.orm import relationship
+
+from datetime import datetime
 
 
 class Cliente(Base):
@@ -51,26 +54,6 @@ class Cuenta(Base):
     idEstadoCuenta = Column(Integer, nullable=False)
     fechaCreacion = Column(TIMESTAMP, server_default=func.now())
 
-
-class Transaccion(Base):
-    __tablename__ = "bcoma_transaccion"
-
-    idTransaccion = Column(Integer, primary_key=True, autoincrement=True)
-    numeroDocumento = Column(String(50), nullable=True)
-    fecha = Column(TIMESTAMP, server_default=func.now(), nullable=True)
-    idCuentaOrigen = Column(Integer, ForeignKey("bcoma_cuenta.idCuenta", ondelete="CASCADE"), nullable=True)
-    idCuentaDestino = Column(Integer, ForeignKey("bcoma_cuenta.idCuenta", ondelete="CASCADE"), nullable=True)
-    idTipoTransaccion = Column(Integer, nullable=False)
-    monto = Column(DECIMAL(12, 2), nullable=False)
-    descripcion = Column(Text, nullable=True)
-
-    __table_args__ = (
-        CheckConstraint("monto > 0", name="bcoma_transaccion_chk_1"),
-    )
-
-    def __repr__(self):
-        return f"<Transaccion(id={self.idTransaccion}, numeroDocumento='{self.numeroDocumento}', monto={self.monto})>"
-
 class Historial(Base):
     __tablename__ = "bcoma_historial"
 
@@ -84,3 +67,115 @@ class Historial(Base):
 
     def __repr__(self):
         return f"<Historial(idCorrelativo={self.idCorrelativo}, idCuenta={self.idCuenta}, monto={self.monto}, saldo={self.saldo})>"
+
+
+class Institucion(Base):
+    __tablename__ = "pre_institucion"
+    idInstitucion = Column(Integer, primary_key=True, autoincrement=True)
+    descripcion = Column(String(100), unique=True, nullable=False)
+
+class TipoPrestamo(Base):
+    __tablename__ = "pre_tipoprestamo"
+    idTipoPrestamo = Column(Integer, primary_key=True, autoincrement=True)
+    descripcion = Column(String(100), unique=True, nullable=False)
+
+class Plazo(Base):
+    __tablename__ = "pre_plazo"
+    idPlazo = Column(Integer, primary_key=True, autoincrement=True)
+    cantidadCuotas = Column(Integer, nullable=False)
+    porcentajeAnualIntereses = Column(Numeric(5,2), nullable=False)
+    porcentajeMora = Column(Numeric(5,2), nullable=False)
+    descripcion = Column(Text)
+
+class Moneda(Base):
+    __tablename__ = "bcoma_moneda"
+    idMoneda = Column(Integer, primary_key=True, autoincrement=True)
+    codigo = Column(String(5), unique=True, nullable=False)
+    nombre = Column(String(50), nullable=False)
+
+class PrestamoEncabezado(Base):
+    __tablename__ = "pre_prestamoencabezado"
+
+    idPrestamoEnc = Column(Integer, primary_key=True, index=True)
+    idCliente = Column(Integer, ForeignKey("bcoma_cliente.idCliente"), nullable=False)
+    idInstitucion = Column(Integer, ForeignKey("pre_institucion.idInstitucion"), nullable=False)
+    idTipoPrestamo = Column(Integer, ForeignKey("pre_tipoprestamo.idTipoPrestamo"), nullable=False)
+    idPlazo = Column(Integer, ForeignKey("pre_plazo.idPlazo"), nullable=False)
+    idMoneda = Column(Integer, ForeignKey("bcoma_moneda.idMoneda"), nullable=False)
+    numeroPrestamo = Column(String(20), unique=True, nullable=False)
+    fechaPrestamo = Column(Date, nullable=False)
+    montoPrestamo = Column(Numeric(12, 2), nullable=False)
+    saldoPrestamo = Column(Numeric(12, 2), nullable=False)
+    fechaAutorizacion = Column(Date, nullable=True)
+    fechaVencimiento = Column(Date, nullable=False)
+    observacion = Column(Text)
+    idCuentaDestino = Column(Integer, ForeignKey("bcoma_cuenta.idCuenta"), nullable=False)
+
+class TipoTransaccion(Base):
+    __tablename__ = "bcoma_tipotransaccion"
+    idTipoTransaccion = Column(Integer, primary_key=True, index=True)
+    nombre = Column(String(50), unique=True, nullable=False)
+
+class PrestamoDetalle(Base):
+    __tablename__ = "pre_prestamodetalle"
+
+    idPrestamoDet = Column(Integer, primary_key=True, autoincrement=True)
+    idPrestamoEnc = Column(Integer, ForeignKey("pre_prestamoencabezado.idPrestamoEnc", ondelete="CASCADE"), nullable=False)
+    numeroCuota = Column(Integer, nullable=False)
+    fechaPago = Column(Date, nullable=False)
+    montoCapital = Column(Numeric(12, 2), nullable=False)
+    montoIntereses = Column(Numeric(12, 2), nullable=False)
+    totalAPagar = Column(Numeric(12, 2), nullable=False)
+    estado = Column(String(20), default="VIGENTE")
+    fechaCancelado = Column(Date, nullable=True)
+    documentoPago = Column(String(100), nullable=True)
+
+class MovimientoPagoEncabezado(Base):
+    __tablename__ = "pre_movimientopagoencabezado"
+
+    idMovimientoEnc = Column(Integer, primary_key=True, autoincrement=True)
+    documentoPago = Column(String(50), nullable=False)
+    fechaPago = Column(Date, nullable=False)
+    idPrestamoEnc = Column(Integer, ForeignKey("pre_prestamoencabezado.idPrestamoEnc"), nullable=False)
+    idFormaPago = Column(Integer, ForeignKey("pre_tipoformapago.idFormaPago"), nullable=False)
+    cantidadCuotasPaga = Column(Integer, nullable=False)
+    descripcionPago = Column(Text)
+    pagoMontoCapital = Column(DECIMAL(12, 2))
+    pagoMontoInteres = Column(DECIMAL(12, 2))
+    pagoMora = Column(DECIMAL(12, 2))
+    totalPago = Column(DECIMAL(12, 2))
+    estado = Column(String(20), default="VIGENTE")
+
+class MovimientoPagoDetalle(Base):
+    __tablename__ = "pre_movimientopagodetalle"
+
+    idMovimientoPagoDeta = Column(Integer, primary_key=True, autoincrement=True)
+    idMovimientoPagoEnc = Column(Integer, ForeignKey("pre_movimientopagoencabezado.idMovimientoEnc"), nullable=False)
+    idPrestamoDet = Column(Integer, ForeignKey("pre_prestamodetalle.idPrestamoDet"), nullable=False)
+    idPrestamoEnc = Column(Integer, ForeignKey("pre_prestamoencabezado.idPrestamoEnc"), nullable=False)
+    numeroCuota = Column(Integer, nullable=False)
+    pagoMontoCapital = Column(DECIMAL(12, 2))
+    pagoMontoIntereses = Column(DECIMAL(12, 2))
+    pagoMoraCuota = Column(DECIMAL(12, 2))
+    totalPago = Column(DECIMAL(12, 2))
+    estado = Column(String(20), default="VIGENTE")
+
+class TipoFormaPago(Base):
+    __tablename__ = "pre_tipoformapago"
+
+    idFormaPago = Column(Integer, primary_key=True, autoincrement=True)
+    descripcion = Column(String(100), nullable=False, unique=True)
+
+class Transaccion(Base):
+    __tablename__ = "bcoma_transaccion"
+
+    idTransaccion = Column(Integer, primary_key=True, autoincrement=True)
+    numeroDocumento = Column(String(50), nullable=True)
+    fecha = Column(TIMESTAMP, server_default=func.now(), nullable=True)
+    idCuentaOrigen = Column(Integer, ForeignKey("bcoma_cuenta.idCuenta", ondelete="CASCADE"), nullable=True)
+    idCuentaDestino = Column(Integer, ForeignKey("bcoma_cuenta.idCuenta", ondelete="CASCADE"), nullable=True)
+    idTipoTransaccion = Column(Integer, ForeignKey("bcoma_tipotransaccion.idTipoTransaccion"), nullable=False)
+    monto = Column(DECIMAL(12, 2), nullable=False)
+    descripcion = Column(Text, nullable=True)
+
+    tipoTransaccion = relationship("TipoTransaccion")  # Nueva relación agregada aquí

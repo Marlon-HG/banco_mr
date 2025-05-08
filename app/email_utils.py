@@ -1,3 +1,4 @@
+# app/email_utils.py
 import os
 import smtplib
 import ssl

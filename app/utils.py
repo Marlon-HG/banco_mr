@@ -1,97 +1,84 @@
-from app import models  # Asegúrate de que models incluya tus clases Cuenta y Transaccion
-
+# app/utils.py
+from app import models
+from sqlalchemy.orm import Session
+from datetime import date
+from decimal import Decimal
+from dateutil.relativedelta import relativedelta
+from typing import List
+from datetime import datetime
 
 def generate_account_number(db, idTipoCuenta: int, idMoneda: int) -> str:
-    # Definir el código según el tipo de cuenta
-    if idTipoCuenta == 1:
-        tipo_code = "MT"  # Monetaria
-    elif idTipoCuenta == 2:
-        tipo_code = "AH"  # Ahorro
-    else:
-        tipo_code = "OT"  # Otro, en caso de ampliación
-
-    # Definir el código según la moneda
-    if idMoneda == 1:
-        moneda_code = "Q"  # Quetzales
-    elif idMoneda == 2:
-        moneda_code = "D"  # Dólares
-    elif idMoneda == 3:
-        moneda_code = "E"  # Euros
-    else:
-        moneda_code = "X"
-
-    # Construir el prefijo
+    tipo_code = {1: "MT", 2: "AH"}.get(idTipoCuenta, "OT")
+    moneda_code = {1: "Q", 2: "D", 3: "E"}.get(idMoneda, "X")
     prefix = f"{tipo_code}{moneda_code}"
-    # Buscar secuencial, usando 4 dígitos (0001, 0002, …)
     n = 1
     while db.query(models.Cuenta).filter(models.Cuenta.numeroCuenta == f"{prefix}{n:04d}").first():
         n += 1
     return f"{prefix}{n:04d}"
 
-
 def generate_document_number(db, idTipoTransaccion: int, idMoneda: int) -> str:
-    """
-    Genera automáticamente un número de documento basado en:
-      - El tipo de transacción:
-          1 -> "DEP" (Depósito)
-          2 -> "RET" (Retiro)
-          3 -> "TRA" (Transferencia)
-      - El tipo de moneda, según el siguiente mapeo:
-          1 -> "Q"   (Quetzales)
-          2 -> "D"   (Dólares)
-          3 -> "E"   (Euros)
-      - Un número secuencial de 4 dígitos que se incrementa en caso de repetición.
-    """
-    # Definir código según el tipo de transacción
-    if idTipoTransaccion == 1:
-        tipo_code = "DEP"
-    elif idTipoTransaccion == 2:
-        tipo_code = "RET"
-    elif idTipoTransaccion == 3:
-        tipo_code = "TRA"
-    else:
-        tipo_code = "OTR"
-
-    # Definir el código según la moneda
-    if idMoneda == 1:
-        moneda_code = "Q"
-    elif idMoneda == 2:
-        moneda_code = "D"
-    elif idMoneda == 3:
-        moneda_code = "E"
-    else:
-        moneda_code = "X"
-
+    tipo_code = {1: "DEP", 2: "RET", 3: "TRA"}.get(idTipoTransaccion, "OTR")
+    moneda_code = {1: "Q", 2: "D", 3: "E"}.get(idMoneda, "X")
     prefix = f"{tipo_code}{moneda_code}"
     n = 1
-    # Se verifica que el número generado sea único en la tabla de transacciones
     while db.query(models.Transaccion).filter(models.Transaccion.numeroDocumento == f"{prefix}{n:04d}").first():
         n += 1
     return f"{prefix}{n:04d}"
 
-
 def convert_currency(amount: float, source_currency: int, dest_currency: int) -> float:
-    """
-    Convierte un monto de la moneda de origen a la moneda destino.
-
-    Las tasas de conversión se basan en el valor en Quetzales:
-      - 1: Quetzales → 1.0
-      - 2: Dólares  → 7.7   (1 USD = 7.7 GTQ)
-      - 3: Euros    → 8.5   (1 EUR = 8.5 GTQ)
-
-    La fórmula aplicada es:
-       monto_destino = (monto_origen * tasa_origen) / tasa_destino
-    """
-    rates = {
-        1: 1.0,  # Quetzales
-        2: 7.7,  # Dólares
-        3: 8.5  # Euros
-    }
+    rates = {1: 1.0, 2: 7.7, 3: 8.5}
     if source_currency not in rates or dest_currency not in rates:
         raise ValueError("Moneda no soportada para la conversión")
-
-    # Convertir el monto a Quetzales
     amount_in_quetzales = amount * rates[source_currency]
-    # Convertir de Quetzales a la moneda destino
-    converted_amount = amount_in_quetzales / rates[dest_currency]
-    return converted_amount
+    return amount_in_quetzales / rates[dest_currency]
+
+def generar_numero_prestamo(db: Session) -> str:
+    last = db.query(models.PrestamoEncabezado).order_by(models.PrestamoEncabezado.idPrestamoEnc.desc()).first()
+    nuevo_num = f"PRE{last.idPrestamoEnc + 1:06}" if last else "PRE000001"
+    return nuevo_num
+
+def generar_numero_documento(db):
+    last = db.query(models.Transaccion).order_by(models.Transaccion.idTransaccion.desc()).first()
+    next_id = 1 if not last else last.idTransaccion + 1
+    return f"PRE{next_id:06d}"
+
+def generar_cuotas_sistema_frances(
+    monto_prestamo: Decimal,
+    interes_anual: float,
+    numero_cuotas: int,
+    fecha_inicio: date
+) -> list:
+    cuotas = []
+    tasa_mensual = Decimal(str(interes_anual)) / Decimal("12") / Decimal("100")
+    cuota_mensual = monto_prestamo * (tasa_mensual / (1 - (1 + tasa_mensual) ** -numero_cuotas))
+    cuota_mensual = cuota_mensual.quantize(Decimal("0.01"))
+
+    saldo_restante = monto_prestamo
+    for i in range(1, numero_cuotas + 1):
+        intereses = (saldo_restante * tasa_mensual).quantize(Decimal("0.01"))
+        capital = (cuota_mensual - intereses).quantize(Decimal("0.01"))
+        saldo_restante = (saldo_restante - capital).quantize(Decimal("0.01"))
+        cuotas.append({
+            "numeroCuota": i,
+            "fechaPago": fecha_inicio + relativedelta(months=i),
+            "montoCapital": capital,
+            "montoIntereses": intereses,
+            "totalAPagar": capital + intereses
+        })
+    return cuotas
+
+
+def generar_numero_documento_pago(db: Session) -> str:
+    anio_actual = datetime.now().year
+    ultimo = (
+        db.query(models.MovimientoPagoEncabezado)
+        .filter(models.MovimientoPagoEncabezado.documentoPago.like(f'PAG{anio_actual}%'))
+        .order_by(models.MovimientoPagoEncabezado.idMovimientoEnc.desc())
+        .first()
+    )
+
+    secuencia = 1
+    if ultimo and ultimo.documentoPago[7:].isdigit():
+        secuencia = int(ultimo.documentoPago[7:]) + 1
+
+    return f"PAG{anio_actual}{secuencia:04d}"

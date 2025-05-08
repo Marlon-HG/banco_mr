@@ -1,8 +1,7 @@
-# app/schemas.py
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
-from pydantic import BaseModel
 from datetime import datetime
+from decimal import Decimal
 
 # Para registro del cliente (datos personales)
 class ClienteCreate(BaseModel):
@@ -40,7 +39,6 @@ class CuentaCreate(BaseModel):
     idTipoCuenta: int
     saldoInicial: Optional[float] = 0.00
     idMoneda: int
-    # idEstadoCuenta se asigna por defecto (Activo), por lo tanto no se incluye en el input
 
 class Cuenta(BaseModel):
     idCuenta: int
@@ -55,10 +53,70 @@ class Cuenta(BaseModel):
     class Config:
         orm_mode = True
 
-
 class TransaccionCreate(BaseModel):
-    idCuentaOrigen: str    # Ahora es una cadena: el número de cuenta, por ejemplo "MTQ0001"
+    idCuentaOrigen: str
     idTipoTransaccion: int
     monto: float
     descripcion: Optional[str] = None
-    idCuentaDestino: Optional[str] = None  # Para transferencia, el número de cuenta destino
+    idCuentaDestino: Optional[str] = None
+
+class SolicitudPrestamo(BaseModel):
+    idInstitucion: int = Field(..., gt=0, description="ID válido de institución")
+    idTipoPrestamo: int = Field(..., gt=0, description="ID válido de tipo de préstamo")
+    idPlazo: int = Field(..., gt=0, description="ID válido de plazo")
+    idMoneda: int = Field(..., gt=0, description="ID válido de tipo de moneda")
+    montoPrestamo: Decimal = Field(..., gt=0, description="Monto del préstamo, debe ser mayor a cero.")
+    observacion: Optional[str] = None
+    numeroCuentaDestino: str = Field(..., min_length=4, description="Número de cuenta destino válido")
+
+class AprobacionPrestamo(BaseModel):
+    numeroPrestamo: str
+    aprobar: bool
+
+class PagoPrestamo(BaseModel):
+    numeroPrestamo: str
+    montoPago: float
+    numeroCuentaOrigen: str
+
+class InstitucionOut(BaseModel):
+    idInstitucion: int
+    nombre: str
+
+    class Config:
+        orm_mode = True
+
+class TipoPrestamoOut(BaseModel):
+    idTipoPrestamo: int
+    nombre: str
+
+    class Config:
+        orm_mode = True
+
+class PlazoOut(BaseModel):
+    idPlazo: int
+    cantidadCuotas: int
+    porcentajeAnualIntereses: float
+    descripcion: str
+
+    class Config:
+        orm_mode = True
+
+class MonedaOut(BaseModel):
+    idMoneda: int
+    nombre: str
+    simbolo: str
+
+    class Config:
+        orm_mode = True
+
+class TransaccionOut(BaseModel):
+    numeroDocumento: str
+    fecha: datetime
+    idCuentaOrigen: Optional[int]
+    idCuentaDestino: Optional[int]
+    idTipoTransaccion: int
+    monto: Decimal
+    descripcion: Optional[str]
+
+    class Config:
+        orm_mode = True
