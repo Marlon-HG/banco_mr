@@ -25,10 +25,16 @@ def generate_document_number(db, idTipoTransaccion: int, idMoneda: int) -> str:
         n += 1
     return f"{prefix}{n:04d}"
 
-def convert_currency(amount: float, source_currency: int, dest_currency: int) -> float:
-    rates = {1: 1.0, 2: 7.7, 3: 8.5}
+def convert_currency(amount: Decimal, source_currency: int, dest_currency: int) -> Decimal:
+    rates = {
+        1: Decimal("1.0"),   # Quetzal
+        2: Decimal("7.7"),   # Dólar (1 USD = 7.7 GTQ)
+        3: Decimal("8.5"),   # Euro (1 EUR = 8.5 GTQ)
+    }
+
     if source_currency not in rates or dest_currency not in rates:
         raise ValueError("Moneda no soportada para la conversión")
+
     amount_in_quetzales = amount * rates[source_currency]
     return amount_in_quetzales / rates[dest_currency]
 
