@@ -6,3 +6,4 @@ python-jose
 passlib[bcrypt]
 python-dotenv
 email-validator
+python-dateutil
