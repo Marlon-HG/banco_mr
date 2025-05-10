@@ -1,6 +1,6 @@
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 
 # Para registro del cliente (datos personales)
@@ -117,3 +117,36 @@ class TransaccionOut(BaseModel):
     tipoTransaccion: str
     monto: float
     descripcion: Optional[str] = None
+
+
+class PagoPrestamoOut(BaseModel):
+    documentoPago: str
+    fechaPago: date
+    numeroPrestamo: str
+    cantidadCuotasPaga: int
+    pagoMontoCapital: Decimal
+    pagoMontoInteres: Decimal
+    pagoMora: Decimal
+    totalPago: Decimal
+    estado: str
+
+    class Config:
+        orm_mode = True
+
+
+class PrestamoOut(BaseModel):
+    numeroPrestamo: str
+    fechaPrestamo: date
+    fechaAutorizacion: Optional[date] = None
+    fechaVencimiento: date
+    montoPrestamo: float
+    saldoPrestamo: float
+    institucion: str
+    tipoPrestamo: str
+    moneda: str
+    estado: str
+    plazo: str
+    cuentaDestino: str
+
+    class Config:
+        orm_mode = True

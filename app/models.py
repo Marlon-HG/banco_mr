@@ -95,21 +95,37 @@ class Moneda(Base):
 
 class PrestamoEncabezado(Base):
     __tablename__ = "pre_prestamoencabezado"
+    __table_args__  = {'extend_existing': True}
 
-    idPrestamoEnc = Column(Integer, primary_key=True, index=True)
-    idCliente = Column(Integer, ForeignKey("bcoma_cliente.idCliente"), nullable=False)
-    idInstitucion = Column(Integer, ForeignKey("pre_institucion.idInstitucion"), nullable=False)
-    idTipoPrestamo = Column(Integer, ForeignKey("pre_tipoprestamo.idTipoPrestamo"), nullable=False)
-    idPlazo = Column(Integer, ForeignKey("pre_plazo.idPlazo"), nullable=False)
-    idMoneda = Column(Integer, ForeignKey("bcoma_moneda.idMoneda"), nullable=False)
-    numeroPrestamo = Column(String(20), unique=True, nullable=False)
-    fechaPrestamo = Column(Date, nullable=False)
-    montoPrestamo = Column(Numeric(12, 2), nullable=False)
-    saldoPrestamo = Column(Numeric(12, 2), nullable=False)
+    idPrestamoEnc     = Column(Integer, primary_key=True, index=True)
+    idCliente         = Column(Integer, ForeignKey("bcoma_cliente.idCliente"), nullable=False)
+    idInstitucion     = Column(Integer, ForeignKey("pre_institucion.idInstitucion"), nullable=False)
+    idTipoPrestamo    = Column(Integer, ForeignKey("pre_tipoprestamo.idTipoPrestamo"), nullable=False)
+    idPlazo           = Column(Integer, ForeignKey("pre_plazo.idPlazo"), nullable=False)
+    idMoneda          = Column(Integer, ForeignKey("bcoma_moneda.idMoneda"), nullable=False)
+    numeroPrestamo    = Column(String(20), unique=True, nullable=False)
+    fechaPrestamo     = Column(Date, nullable=False)
+    montoPrestamo     = Column(Numeric(12,2), nullable=False)
+    saldoPrestamo     = Column(Numeric(12,2), nullable=False)
     fechaAutorizacion = Column(Date, nullable=True)
-    fechaVencimiento = Column(Date, nullable=False)
-    observacion = Column(Text)
-    idCuentaDestino = Column(Integer, ForeignKey("bcoma_cuenta.idCuenta"), nullable=False)
+    fechaVencimiento  = Column(Date, nullable=False)
+    observacion       = Column(Text)
+    idCuentaDestino   = Column(Integer, ForeignKey("bcoma_cuenta.idCuenta"), nullable=False)
+
+    # Relaciones
+    institucion   = relationship("Institucion",     lazy="joined")
+    tipoPrestamo  = relationship("TipoPrestamo",    lazy="joined")
+    plazo         = relationship("Plazo",           lazy="joined")
+    moneda        = relationship("Moneda",          lazy="joined")
+    cuentaDestino = relationship("Cuenta",          lazy="joined", foreign_keys=[idCuentaDestino])
+
+    # ←–– relación a los pagos que correspondan a este préstamo
+    pagos = relationship(
+        "MovimientoPagoEncabezado",
+        back_populates="prestamoEncabezado",
+        lazy="joined"
+    )
+
 
 class TipoTransaccion(Base):
     __tablename__ = "bcoma_tipotransaccion"
@@ -133,18 +149,25 @@ class PrestamoDetalle(Base):
 class MovimientoPagoEncabezado(Base):
     __tablename__ = "pre_movimientopagoencabezado"
 
-    idMovimientoEnc = Column(Integer, primary_key=True, autoincrement=True)
-    documentoPago = Column(String(50), nullable=False)
-    fechaPago = Column(Date, nullable=False)
-    idPrestamoEnc = Column(Integer, ForeignKey("pre_prestamoencabezado.idPrestamoEnc"), nullable=False)
-    idFormaPago = Column(Integer, ForeignKey("pre_tipoformapago.idFormaPago"), nullable=False)
+    idMovimientoEnc    = Column(Integer, primary_key=True, autoincrement=True)
+    documentoPago      = Column(String(50), nullable=False)
+    fechaPago          = Column(Date, nullable=False)
+    idPrestamoEnc      = Column(Integer, ForeignKey("pre_prestamoencabezado.idPrestamoEnc"), nullable=False)
+    idFormaPago        = Column(Integer, ForeignKey("pre_tipoformapago.idFormaPago"), nullable=False)
     cantidadCuotasPaga = Column(Integer, nullable=False)
-    descripcionPago = Column(Text)
-    pagoMontoCapital = Column(DECIMAL(12, 2))
-    pagoMontoInteres = Column(DECIMAL(12, 2))
-    pagoMora = Column(DECIMAL(12, 2))
-    totalPago = Column(DECIMAL(12, 2))
-    estado = Column(String(20), default="VIGENTE")
+    descripcionPago    = Column(Text)
+    pagoMontoCapital   = Column(DECIMAL(12, 2))
+    pagoMontoInteres   = Column(DECIMAL(12, 2))
+    pagoMora           = Column(DECIMAL(12, 2))
+    totalPago          = Column(DECIMAL(12, 2))
+    estado             = Column(String(20), default="VIGENTE")
+
+    # Relación de vuelta al préstamo
+    prestamoEncabezado = relationship(
+        "PrestamoEncabezado",
+        back_populates="pagos",
+        lazy="joined"
+    )
 
 class MovimientoPagoDetalle(Base):
     __tablename__ = "pre_movimientopagodetalle"

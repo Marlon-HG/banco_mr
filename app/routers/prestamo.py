@@ -10,6 +10,17 @@ from app.utils import generar_numero_prestamo, generar_numero_documento,generar_
 from app.email_utils import send_email
 from decimal import Decimal
 router = APIRouter()
+from typing import Optional
+from fastapi import Query
+from sqlalchemy.orm import joinedload
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy.orm import Session, joinedload
+from typing import Optional, List
+from datetime import date
+
+from app.database import get_db
+from app import models, schemas
+from app.auth import get_current_user
 
 @router.post("/prestamos/solicitar")
 def solicitar_prestamo(
@@ -339,3 +350,154 @@ def listar_plazos(db: Session = Depends(get_db)):
 def listar_monedas(db: Session = Depends(get_db)):
     monedas = db.query(models.Moneda).all()
     return [{"id": m.idMoneda, "nombre": m.nombre, "codigo": m.codigo} for m in monedas]
+
+@router.get(
+    "/prestamos/mis-filtrados",
+    response_model=list[schemas.PrestamoOut],
+    summary="Lista los préstamos del cliente con filtros opcionales"
+)
+def listar_prestamos_filtrados(
+    numero_prestamo: Optional[str] = Query(None, description="Buscar por fragmento de número de préstamo"),
+    estado:         Optional[str] = Query(None, regex="^(APROBADO|PENDIENTE)$"),
+    id_tipo_prestamo: Optional[int] = Query(None),
+    id_institucion:  Optional[int] = Query(None),
+    fecha_inicio:    Optional[date] = Query(None),
+    fecha_fin:       Optional[date] = Query(None),
+
+    db:           Session = Depends(get_db),
+    current_user: dict    = Depends(get_current_user),
+):
+    # 1. Validar cliente
+    usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
+    if not usuario or usuario.rol != "cliente":
+        raise HTTPException(403, "Acceso denegado")
+
+    # 2. Build base query con las relaciones
+    q = (
+        db.query(models.PrestamoEncabezado)
+          .options(
+              joinedload(models.PrestamoEncabezado.institucion),
+              joinedload(models.PrestamoEncabezado.tipoPrestamo),
+              joinedload(models.PrestamoEncabezado.plazo),
+              joinedload(models.PrestamoEncabezado.moneda),
+              joinedload(models.PrestamoEncabezado.cuentaDestino),
+          )
+          .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+    )
+
+    # 3. Aplicar filtros si vienen
+    if numero_prestamo:
+        q = q.filter(models.PrestamoEncabezado.numeroPrestamo.ilike(f"%{numero_prestamo}%"))
+    if estado == "APROBADO":
+        q = q.filter(models.PrestamoEncabezado.fechaAutorizacion.isnot(None))
+    elif estado == "PENDIENTE":
+        q = q.filter(models.PrestamoEncabezado.fechaAutorizacion.is_(None))
+    if id_tipo_prestamo:
+        q = q.filter(models.PrestamoEncabezado.idTipoPrestamo == id_tipo_prestamo)
+    if id_institucion:
+        q = q.filter(models.PrestamoEncabezado.idInstitucion == id_institucion)
+    if fecha_inicio:
+        q = q.filter(models.PrestamoEncabezado.fechaPrestamo >= fecha_inicio)
+    if fecha_fin:
+        q = q.filter(models.PrestamoEncabezado.fechaPrestamo <= fecha_fin)
+
+    prestamos = q.order_by(models.PrestamoEncabezado.fechaPrestamo.desc()).all()
+
+    # 4. Volcar al schema PrestamoOut
+    return [
+        {
+            "numeroPrestamo":    p.numeroPrestamo,
+            "fechaPrestamo":     p.fechaPrestamo,
+            "fechaAutorizacion": p.fechaAutorizacion,
+            "fechaVencimiento":  p.fechaVencimiento,
+            "montoPrestamo":     float(p.montoPrestamo),
+            "saldoPrestamo":     float(p.saldoPrestamo),
+            "institucion":       p.institucion.descripcion,
+            "tipoPrestamo":      p.tipoPrestamo.descripcion,
+            "moneda":            p.moneda.nombre,
+            "plazo":             p.plazo.descripcion,
+            "CuentaDestino":     p.cuentaDestino.numeroCuenta,
+            "estado":            "APROBADO" if p.fechaAutorizacion else "PENDIENTE",
+        }
+        for p in prestamos
+    ]
+
+@router.get("/prestamos/mis-pagos", response_model=List[schemas.PagoPrestamoOut])
+def listar_pagos_cliente(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
+    if not usuario or usuario.rol != "cliente":
+        raise HTTPException(403, "Acceso denegado")
+
+    pagos = (
+        db.query(models.MovimientoPagoEncabezado)
+          .join(models.PrestamoEncabezado)
+          .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+          .options(joinedload(models.MovimientoPagoEncabezado.prestamoEncabezado))
+          .order_by(models.MovimientoPagoEncabezado.fechaPago.desc())
+          .all()
+    )
+
+    return [
+        schemas.PagoPrestamoOut(
+            documentoPago      = p.documentoPago,
+            fechaPago          = p.fechaPago,
+            numeroPrestamo     = p.prestamoEncabezado.numeroPrestamo,
+            cantidadCuotasPaga = p.cantidadCuotasPaga,
+            pagoMontoCapital   = p.pagoMontoCapital,
+            pagoMontoInteres   = p.pagoMontoInteres,
+            pagoMora           = p.pagoMora,
+            totalPago          = p.totalPago,
+            estado             = p.estado
+        )
+        for p in pagos
+    ]
+
+
+@router.get("/prestamos/mis-pagos-filtrados", response_model=List[schemas.PagoPrestamoOut])
+def listar_pagos_filtrados(
+    numero_prestamo: Optional[str] = Query(None),
+    fecha_inicio:    Optional[date]  = Query(None),
+    fecha_fin:       Optional[date]  = Query(None),
+    estado:          Optional[str]   = Query(None),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
+    if not usuario or usuario.rol != "cliente":
+        raise HTTPException(403, "Acceso denegado")
+
+    q = (
+        db.query(models.MovimientoPagoEncabezado)
+          .join(models.PrestamoEncabezado)
+          .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+          .options(joinedload(models.MovimientoPagoEncabezado.prestamoEncabezado))
+    )
+
+    if numero_prestamo:
+        q = q.filter(models.PrestamoEncabezado.numeroPrestamo.ilike(f"%{numero_prestamo}%"))
+    if fecha_inicio:
+        q = q.filter(models.MovimientoPagoEncabezado.fechaPago >= fecha_inicio)
+    if fecha_fin:
+        q = q.filter(models.MovimientoPagoEncabezado.fechaPago <= fecha_fin)
+    if estado:
+        q = q.filter(models.MovimientoPagoEncabezado.estado == estado)
+
+    pagos = q.order_by(models.MovimientoPagoEncabezado.fechaPago.desc()).all()
+
+    return [
+        schemas.PagoPrestamoOut(
+            documentoPago      = p.documentoPago,
+            fechaPago          = p.fechaPago,
+            numeroPrestamo     = p.prestamoEncabezado.numeroPrestamo,
+            cantidadCuotasPaga = p.cantidadCuotasPaga,
+            pagoMontoCapital   = p.pagoMontoCapital,
+            pagoMontoInteres   = p.pagoMontoInteres,
+            pagoMora           = p.pagoMora,
+            totalPago          = p.totalPago,
+            estado             = p.estado
+        )
+        for p in pagos
+    ]
