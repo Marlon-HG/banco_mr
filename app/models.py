@@ -25,12 +25,15 @@ class Cliente(Base):
 class Usuario(Base):
     __tablename__ = "bcoma_usuario"
 
-    idUsuario = Column(Integer, primary_key=True, index=True)
-    username = Column(String(50), unique=True, nullable=False)
-    password = Column(String(255), nullable=False)
-    rol = Column(String(20), default="cliente")
+    idUsuario   = Column(Integer, primary_key=True, index=True)
+    username    = Column(String(50), unique=True, nullable=False)
+    password    = Column(String(255), nullable=False)
+    rol         = Column(String(20), default="cliente")
     fechaRegistro = Column(DateTime(timezone=True), server_default=func.now())
-    idCliente = Column(Integer, ForeignKey("bcoma_cliente.idCliente"), nullable=False)
+    idCliente   = Column(Integer, ForeignKey("bcoma_cliente.idCliente"), nullable=False)
+
+    # Nuevo campo de soft-delete
+    estado      = Column(Integer, default=1, nullable=False)  # 1=activo, 2=inactivo
 
 
 class PasswordResetToken(Base):

@@ -1,7 +1,9 @@
 # app/main.py
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, cuentas, transacciones, prestamo
+
+from app.routers import auth, cuentas, transacciones, prestamo, soporte
 
 app = FastAPI(
     title="API Banco - Seguridad y Gestión de Contraseñas",
@@ -9,15 +11,10 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS: orígenes permitidos
-origins = [
-    "http://localhost:4200",         # desarrollo local Angular
-    "https://banco-mr.vercel.app"   # producción en Vercel
-]
-
+# CORS (ajusta allow_origins a tu front en producción)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -28,6 +25,7 @@ app.include_router(auth.router)
 app.include_router(cuentas.router)
 app.include_router(transacciones.router)
 app.include_router(prestamo.router)
+app.include_router(soporte.router)   # <-- módulo de soporte
 
 @app.get("/")
 def read_root():

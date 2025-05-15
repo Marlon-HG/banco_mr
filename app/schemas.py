@@ -1,3 +1,4 @@
+#app/schemas.py
 from pydantic import BaseModel, EmailStr, Field
 from typing import Optional
 from datetime import datetime, date
@@ -150,3 +151,9 @@ class PrestamoOut(BaseModel):
 
     class Config:
         orm_mode = True
+
+class SoporteCambioEstadoCuenta(BaseModel):
+    nuevo_estado: int = Field(..., description="1=activo, 2=inactivo")
+
+class SoporteCambioPassword(BaseModel):
+    nueva_password: str = Field(..., min_length=8, description="Nueva contraseña para el usuario")

@@ -1,184 +1,134 @@
 # app/routers/auth.py
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-import secrets
 from fastapi.security import OAuth2PasswordRequestForm
-from app.database import SessionLocal
-from app import models, auth
+from sqlalchemy.orm import Session
+import secrets
+from datetime import timedelta, datetime
 
-
+from app.database import get_db
 from app import models, schemas, auth, email_utils
-from app.database import SessionLocal
 
 router = APIRouter()
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-###############################################################################
-# Login
-###############################################################################
-
 @router.post("/login")
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
     """
-    Endpoint para iniciar sesión con username y password
-    utilizando OAuth2PasswordRequestForm.
+    Iniciar sesión y obtener token Bearer.
     """
-    # 1. Buscar el usuario en la base de datos por 'username'
-    user = db.query(models.Usuario).filter(models.Usuario.username == form_data.username).first()
+    user = db.query(models.Usuario) \
+        .filter(
+        models.Usuario.username == form_data.username,
+        models.Usuario.estado == 1
+    ) \
+        .first()
     if not user:
-        raise HTTPException(status_code=400, detail="Usuario no encontrado.")
+        raise HTTPException(400, "Usuario no encontrado o inactivo")
 
-    # 2. Verificar la contraseña
-    if not auth.verify_password(form_data.password, user.password):
-        raise HTTPException(status_code=400, detail="Contraseña incorrecta.")
-
-    # 3. Crear token de acceso
-    access_token = auth.create_access_token(
-        data={"sub": user.username}  # "sub" es un claim común para identificar al usuario
-    )
-
+    access_token = auth.create_access_token(data={"sub": user.username})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# Dependencia para obtener la sesión de la BD
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
-###############################################################################
-# Registro de Usuario
-###############################################################################
 
 @router.post("/register", status_code=status.HTTP_201_CREATED)
-def register(user: schemas.UserRegister, db: Session = Depends(get_db)):
-    # Crear el cliente
-    new_cliente = models.Cliente(**user.cliente.dict())
-    db.add(new_cliente)
+def register(
+    user: schemas.UserRegister,
+    db: Session = Depends(get_db)
+):
+    # 1. Crear cliente
+    nuevo_cliente = models.Cliente(**user.cliente.dict())
+    db.add(nuevo_cliente)
     try:
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail="Error al registrar cliente: " + str(e))
-    db.refresh(new_cliente)
+    db.refresh(nuevo_cliente)
 
-    # Generar username a partir de primerNombre y primerApellido
-    base_username = f"{user.cliente.primerNombre}.{user.cliente.primerApellido}"
-    candidate_username = base_username
-    counter = 0
-    while db.query(models.Usuario).filter(models.Usuario.username == candidate_username).first():
-        counter += 1
-        candidate_username = f"{base_username}{counter}"
-    generated_username = candidate_username
+    # 2. Generar username
+    base = f"{user.cliente.primerNombre}.{user.cliente.primerApellido}"
+    candidato = base
+    i = 0
+    while db.query(models.Usuario).filter(models.Usuario.username == candidato).first():
+        i += 1
+        candidato = f"{base}{i}"
+    generated_username = candidato
 
-    # Generar contraseña aleatoria y hashearla
-    auto_password = secrets.token_urlsafe(12)
-    hashed_password = auth.get_password_hash(auto_password)
-
-    # Crear el usuario asociado
-    new_usuario = models.Usuario(
+    # 3. Crear usuario con password aleatoria
+    raw_password = secrets.token_urlsafe(12)
+    hashed = auth.get_password_hash(raw_password)
+    nuevo_usuario = models.Usuario(
         username=generated_username,
-        password=hashed_password,
+        password=hashed,
         rol=user.rol,
-        idCliente=new_cliente.idCliente
+        idCliente=nuevo_cliente.idCliente
     )
-    db.add(new_usuario)
+    db.add(nuevo_usuario)
     try:
         db.commit()
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=400, detail="Error al registrar usuario: " + str(e))
-    db.refresh(new_usuario)
+    db.refresh(nuevo_usuario)
 
-    # Redactar un correo profesional con las credenciales
+    # 4. Enviar correo con credenciales
     subject = "Bienvenido a Banco M&R - Confirmación de Registro"
     body = (
-        f"Estimado(a) {user.cliente.primerNombre} {user.cliente.primerApellido},\n\n"
-        "Nos complace informarle que su registro en Banco M&R se ha realizado con éxito.\n\n"
-        "A continuación, se detallan sus credenciales de acceso:\n"
-        f"   - Nombre de usuario: {generated_username}\n"
-        f"   - Contraseña: {auto_password}\n\n"
-        "Por motivos de seguridad, le recomendamos ingresar a la plataforma y cambiar su contraseña "
-        "lo antes posible.\n\n"
-        "Cordialmente,\n"
-        "Equipo de Banco M&R\n"
-        "https://front-banco-mr.vercel.app/landing/inicio"
+        f"Estimado {user.cliente.primerNombre} {user.cliente.primerApellido},\n\n"
+        "Su registro ha sido exitoso.\n\n"
+        f"Usuario: {generated_username}\n"
+        f"Contraseña: {raw_password}\n\n"
+        "Por favor cambie su contraseña la primera vez que ingrese.\n\n"
+        "Saludos,\nEquipo Banco M&R"
     )
     try:
         email_utils.send_email(subject, user.cliente.correo, body)
     except Exception:
-        raise HTTPException(status_code=500, detail="No se pudo enviar el correo con las credenciales.")
+        raise HTTPException(status_code=500, detail="No se pudo enviar correo de credenciales")
 
     return {
-        "mensaje": "Usuario registrado exitosamente. Se ha enviado un correo con las credenciales.",
-        "cliente_id": new_cliente.idCliente,
+        "mensaje": "Usuario registrado correctamente. Revise su correo.",
         "username": generated_username
     }
 
 
-###############################################################################
-# Cambio de Contraseña (Usuario Autenticado)
-###############################################################################
-
 @router.post("/password-change", status_code=status.HTTP_200_OK)
-def password_change(data: schemas.PasswordChange,
-                    db: Session = Depends(get_db),
-                    current_user: dict = Depends(auth.get_current_user)):
-    # Obtener el usuario basado en el username extraído del token
+def password_change(
+    data: schemas.PasswordChange,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(auth.get_current_user)
+):
     usuario = db.query(models.Usuario).filter(models.Usuario.username == current_user["username"]).first()
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
-    # Verificar que la contraseña actual coincida
     if not auth.verify_password(data.old_password, usuario.password):
-        raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")
+        raise HTTPException(status_code=400, detail="Contraseña actual incorrecta")
 
-    # Hashear la nueva contraseña y actualizar el registro
-    nuevo_hash = auth.get_password_hash(data.new_password)
-    usuario.password = nuevo_hash
-    try:
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="Error al actualizar la contraseña: " + str(e))
-
+    usuario.password = auth.get_password_hash(data.new_password)
+    db.commit()
     return {"mensaje": "Contraseña actualizada correctamente"}
 
 
-###############################################################################
-# Solicitud de Reinicio de Contraseña (Olvido)
-###############################################################################
-
 @router.post("/password-reset-request", status_code=status.HTTP_200_OK)
-def password_reset_request(data: schemas.PasswordResetRequest, db: Session = Depends(get_db)):
-    # Buscar al cliente por correo y DPI
+def password_reset_request(
+    data: schemas.PasswordResetRequest,
+    db: Session = Depends(get_db)
+):
     cliente = db.query(models.Cliente).filter(
         models.Cliente.correo == data.correo,
         models.Cliente.dpi == data.dpi
     ).first()
     if not cliente:
-        raise HTTPException(status_code=404, detail="No se encontró cliente con esos datos")
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
 
-    # Buscar al usuario asociado
     usuario = db.query(models.Usuario).filter(models.Usuario.idCliente == cliente.idCliente).first()
     if not usuario:
-        raise HTTPException(status_code=404, detail="No se encontró usuario asociado al cliente")
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # Generar un token aleatorio para reinicio y definir su expiración (ej. 1 hora)
     reset_token = secrets.token_urlsafe(32)
     expiration = datetime.utcnow() + timedelta(hours=1)
-
-    # Guardar el token en la BD (tabla auth_password_reset_token)
     token_entry = models.PasswordResetToken(
         idUsuario=usuario.idUsuario,
         token=reset_token,
@@ -186,64 +136,35 @@ def password_reset_request(data: schemas.PasswordResetRequest, db: Session = Dep
         usado=0
     )
     db.add(token_entry)
-    try:
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="Error al generar token de restablecimiento: " + str(e))
+    db.commit()
 
-    # Enviar un correo con las instrucciones y el token
-    subject = "Solicitud de Restablecimiento de Contraseña - Banco M&R"
     reset_link = f"https://front-banco-mr.vercel.app/auth/recupera?token={reset_token}"
+    subject = "Restablecimiento de Contraseña - Banco M&R"
     body = (
-        f"Estimado usuario,\n\n"
-        "Hemos recibido una solicitud para restablecer la contraseña de su cuenta en Banco M&R.\n"
-        "Para proceder, por favor haga clic en el siguiente enlace o cópielo en su navegador:\n"
+        "Haga clic en el siguiente enlace para restablecer su contraseña:\n\n"
         f"{reset_link}\n\n"
-        "El enlace es válido por 1 hora.\n\n"
-        "Si usted no realizó esta solicitud, por favor ignore este correo.\n\n"
-        "Atentamente,\n"
-        "Equipo de Banco M&R"
+        "El enlace vence en 1 hora."
     )
-    try:
-        email_utils.send_email(subject, data.correo, body)
-    except Exception:
-        raise HTTPException(status_code=500, detail="No se pudo enviar el correo para restablecer la contraseña")
+    email_utils.send_email(subject, data.correo, body)
+    return {"mensaje": "Se envió correo para restablecer contraseña"}
 
-    return {"mensaje": "Se ha enviado un correo para restablecer la contraseña"}
-
-
-###############################################################################
-# Reinicio de Contraseña usando Token
-###############################################################################
 
 @router.post("/password-reset", status_code=status.HTTP_200_OK)
-def password_reset(data: schemas.PasswordReset, db: Session = Depends(get_db)):
-    # Buscar el token en la BD
+def password_reset(
+    data: schemas.PasswordReset,
+    db: Session = Depends(get_db)
+):
     token_entry = db.query(models.PasswordResetToken).filter(
         models.PasswordResetToken.token == data.token
     ).first()
-    if not token_entry:
-        raise HTTPException(status_code=404, detail="Token inválido")
-    if token_entry.usado:
-        raise HTTPException(status_code=400, detail="El token ya fue utilizado")
-    if token_entry.fechaExpiracion < datetime.utcnow():
-        raise HTTPException(status_code=400, detail="El token ha expirado")
+    if not token_entry or token_entry.usado or token_entry.fechaExpiracion < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="Token inválido o expirado")
 
-    # Obtener el usuario asociado al token
     usuario = db.query(models.Usuario).filter(models.Usuario.idUsuario == token_entry.idUsuario).first()
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    # Actualizar la contraseña del usuario y marcar el token como utilizado
-    nuevo_hash = auth.get_password_hash(data.new_password)
-    usuario.password = nuevo_hash
+    usuario.password = auth.get_password_hash(data.new_password)
     token_entry.usado = 1
-
-    try:
-        db.commit()
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=400, detail="Error al restablecer la contraseña: " + str(e))
-
+    db.commit()
     return {"mensaje": "Contraseña restablecida correctamente"}
