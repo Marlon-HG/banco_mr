@@ -3,7 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session, joinedload
 from datetime import datetime
 from decimal import Decimal
-
+from datetime import timezone
+from zoneinfo import ZoneInfo
 from app import models, schemas, auth, email_utils
 from app.database import SessionLocal
 from app.utils import generate_document_number, convert_currency
@@ -124,45 +125,97 @@ def create_transaccion(
 
         return {"mensaje": "Retiro realizado exitosamente", "transaccion": transaccion}
 
+
     elif transaccion_data.idTipoTransaccion == 3:  # Transferencia
+
         if cuenta_origen.saldo < monto:
             raise HTTPException(status_code=400, detail="Saldo insuficiente")
 
+        # Guardamos saldos antes
+
+        saldo_origen_antes = cuenta_origen.saldo
+
+        saldo_destino_antes = cuenta_destino.saldo
+
         if cuenta_origen.idMoneda != cuenta_destino.idMoneda:
+
             monto_convertido = convert_currency(monto, cuenta_origen.idMoneda, cuenta_destino.idMoneda)
+
         else:
+
             monto_convertido = monto
 
+        # Aplicamos los cambios
+
         cuenta_origen.saldo -= monto
+
         cuenta_destino.saldo += monto_convertido
 
+        # Capturamos saldos después
+
+        saldo_origen_despues = cuenta_origen.saldo
+
+        saldo_destino_despues = cuenta_destino.saldo
+
+        # Creamos la transacción
+
         transaccion = models.Transaccion(
+
             numeroDocumento=numero_documento,
+
             idCuentaOrigen=cuenta_origen.idCuenta,
+
             idCuentaDestino=cuenta_destino.idCuenta,
+
             idTipoTransaccion=3,
+
             monto=monto,
+
             descripcion=transaccion_data.descripcion
+
         )
+
         db.add(transaccion)
+
         db.commit()
+
         db.refresh(transaccion)
 
+        utc_dt = transaccion.fecha.replace(tzinfo=timezone.utc)
+        local_dt = utc_dt.astimezone(ZoneInfo("America/Guatemala"))
+
+        # Historial
+
         historial_origen = models.Historial(
+
             idCuenta=cuenta_origen.idCuenta,
+
             idTransaccion=transaccion.idTransaccion,
+
             numeroDocumento=numero_documento,
+
             monto=monto,
-            saldo=cuenta_origen.saldo
+
+            saldo=saldo_origen_despues
+
         )
+
         historial_destino = models.Historial(
+
             idCuenta=cuenta_destino.idCuenta,
+
             idTransaccion=transaccion.idTransaccion,
+
             numeroDocumento=numero_documento,
+
             monto=monto_convertido,
-            saldo=cuenta_destino.saldo
+
+            saldo=saldo_destino_despues
+
         )
+
         db.add_all([historial_origen, historial_destino])
+
         db.commit()
 
         cliente_origen = db.query(models.Cliente).filter_by(idCliente=cuenta_origen.idCliente).first()
@@ -179,7 +232,15 @@ def create_transaccion(
             f"Hola {cliente_destino.primerNombre}, has recibido Q{monto_convertido} en tu cuenta {cuenta_destino.numeroCuenta}.\nDocumento: {numero_documento}"
         )
 
-        return {"mensaje": "Transferencia realizada exitosamente", "transaccion": transaccion}
+        return {
+            "mensaje": "Transferencia realizada exitosamente",
+            "numeroDocumento": numero_documento,
+            "fecha": local_dt.isoformat(),  # e.g. "2025-05-15T23:07:44-06:00"
+            "saldoOrigenAntes": float(saldo_origen_antes),
+            "saldoOrigenDespues": float(saldo_origen_despues),
+            "saldoDestinoAntes": float(saldo_destino_antes),
+            "saldoDestinoDespues": float(saldo_destino_despues),
+        }
 
     raise HTTPException(status_code=400, detail="Tipo de transacción no válido")
 
