@@ -1,52 +1,53 @@
 # app/routers/prestamo.py
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from datetime import date
-from dateutil.relativedelta import relativedelta
-from app.database import get_db
-from app import models, schemas
-from app.auth import get_current_user
-from app.utils import generar_numero_prestamo, generar_numero_documento,generar_cuotas_sistema_frances, generar_numero_documento_pago
-from app.email_utils import send_email
-from decimal import Decimal
-router = APIRouter()
-from typing import Optional
-from fastapi import Query
-from sqlalchemy.orm import joinedload
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from typing import Optional, List
 from datetime import date
+from dateutil.relativedelta import relativedelta
+from decimal import Decimal
+from typing import Optional, List
 
 from app.database import get_db
 from app import models, schemas
 from app.auth import get_current_user
+from app.utils import (
+    generar_numero_prestamo,
+    generar_numero_documento,
+    generar_cuotas_sistema_frances,
+    generar_numero_documento_pago,
+)
+from app.email_utils import send_email
+
+router = APIRouter()
+
 
 @router.post("/prestamos/solicitar")
 def solicitar_prestamo(
     data: schemas.SolicitudPrestamo,
     db: Session = Depends(get_db),
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
 ):
     usuario = db.query(models.Usuario).filter_by(username=user["username"]).first()
     if not usuario or usuario.rol != "cliente":
-        raise HTTPException(status_code=403, detail="Acceso denegado")
+        raise HTTPException(403, "Acceso denegado")
 
-    idCliente = usuario.idCliente
-    cuenta = db.query(models.Cuenta).filter_by(numeroCuenta=data.numeroCuentaDestino, idCliente=idCliente).first()
+    cuenta = (
+        db.query(models.Cuenta)
+        .filter_by(numeroCuenta=data.numeroCuentaDestino, idCliente=usuario.idCliente)
+        .first()
+    )
     if not cuenta:
-        raise HTTPException(status_code=404, detail="Número de cuenta inválido o no pertenece al cliente")
+        raise HTTPException(404, "Número de cuenta inválido o no pertenece al cliente")
 
     plazo = db.query(models.Plazo).filter_by(idPlazo=data.idPlazo).first()
     if not plazo:
-        raise HTTPException(status_code=404, detail="Plazo no válido")
+        raise HTTPException(404, "Plazo no válido")
 
     numero_prestamo = generar_numero_prestamo(db)
     fecha_actual = date.today()
     fecha_vencimiento = fecha_actual + relativedelta(months=plazo.cantidadCuotas)
 
-    nuevo_prestamo = models.PrestamoEncabezado(
-        idCliente=idCliente,
+    nuevo = models.PrestamoEncabezado(
+        idCliente=usuario.idCliente,
         idInstitucion=data.idInstitucion,
         idTipoPrestamo=data.idTipoPrestamo,
         idPlazo=data.idPlazo,
@@ -58,334 +59,287 @@ def solicitar_prestamo(
         fechaAutorizacion=None,
         fechaVencimiento=fecha_vencimiento,
         observacion=data.observacion,
-        idCuentaDestino=cuenta.idCuenta
+        idCuentaDestino=cuenta.idCuenta,
     )
+    db.add(nuevo)
+    db.flush()
 
-    db.add(nuevo_prestamo)
-    db.flush()  # Para obtener el ID generado
-
-    # Calcular cuotas con sistema francés
     cuotas = generar_cuotas_sistema_frances(
         monto_prestamo=Decimal(data.montoPrestamo),
         interes_anual=float(plazo.porcentajeAnualIntereses),
-        numero_cuotas=int(plazo.cantidadCuotas),
-        fecha_inicio=fecha_actual + relativedelta(months=1)
+        numero_cuotas=plazo.cantidadCuotas,
+        fecha_inicio=fecha_actual + relativedelta(months=1),
     )
-
-    # Insertar detalles de cuotas
-    for cuota in cuotas:
-        detalle = models.PrestamoDetalle(
-            idPrestamoEnc=nuevo_prestamo.idPrestamoEnc,
-            numeroCuota=cuota["numeroCuota"],
-            fechaPago=cuota["fechaPago"],
-            montoCapital=cuota["montoCapital"],
-            montoIntereses=cuota["montoIntereses"],
-            totalAPagar=cuota["totalAPagar"]
+    for c in cuotas:
+        db.add(
+            models.PrestamoDetalle(
+                idPrestamoEnc=nuevo.idPrestamoEnc,
+                numeroCuota=c["numeroCuota"],
+                fechaPago=c["fechaPago"],
+                montoCapital=c["montoCapital"],
+                montoIntereses=c["montoIntereses"],
+                totalAPagar=c["totalAPagar"],
+            )
         )
-        db.add(detalle)
-
     db.commit()
 
-    # Enviar notificación por correo
-    cliente = db.query(models.Cliente).filter_by(idCliente=idCliente).first()
+    cliente = db.query(models.Cliente).filter_by(idCliente=usuario.idCliente).first()
     if cliente and cliente.correo:
         try:
             send_email(
                 subject="Solicitud de préstamo recibida",
                 recipient=cliente.correo,
-                body=f"Hola {cliente.primerNombre},\n\nTu solicitud de préstamo número {numero_prestamo} ha sido registrada y está pendiente de aprobación."
+                body=f"Hola {cliente.primerNombre}, tu solicitud {numero_prestamo} está pendiente de aprobación.",
             )
-        except Exception:
-            pass  # Silenciar error de envío
+        except:
+            pass
 
-    return {
-        "mensaje": "Solicitud de préstamo registrada y cuotas generadas.",
-        "numeroPrestamo": numero_prestamo
-    }
+    return {"mensaje": "Solicitud de préstamo registrada y cuotas generadas.", "numeroPrestamo": numero_prestamo}
 
 
 @router.post("/prestamos/aprobar")
 def aprobar_prestamo(
     data: schemas.AprobacionPrestamo,
     db: Session = Depends(get_db),
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
 ):
     usuario = db.query(models.Usuario).filter_by(username=user["username"]).first()
     if not usuario or usuario.rol != "admin":
-        raise HTTPException(status_code=403, detail="Solo los administradores pueden aprobar préstamos.")
+        raise HTTPException(403, "Solo administradores pueden aprobar préstamos")
 
-    prestamo = db.query(models.PrestamoEncabezado).filter_by(numeroPrestamo=data.numeroPrestamo).first()
+    prestamo = (
+        db.query(models.PrestamoEncabezado)
+        .filter_by(numeroPrestamo=data.numeroPrestamo)
+        .first()
+    )
     if not prestamo:
-        raise HTTPException(status_code=404, detail="Préstamo no encontrado.")
-
+        raise HTTPException(404, "Préstamo no encontrado")
     if prestamo.fechaAutorizacion is not None:
-        raise HTTPException(status_code=400, detail="Este préstamo ya fue procesado.")
+        raise HTTPException(400, "Este préstamo ya fue procesado")
 
-    cuenta = db.query(models.Cuenta).filter_by(idCuenta=prestamo.idCuentaDestino, idCliente=prestamo.idCliente).first()
+    cuenta = (
+        db.query(models.Cuenta)
+        .filter_by(idCuenta=prestamo.idCuentaDestino, idCliente=prestamo.idCliente)
+        .first()
+    )
     if not cuenta:
-        raise HTTPException(status_code=404, detail="Cuenta destino no válida o no pertenece al cliente.")
+        raise HTTPException(404, "Cuenta destino no válida o no pertenece al cliente")
 
     fecha_actual = date.today()
-
+    prestamo.fechaAutorizacion = fecha_actual
     if data.aprobar:
-        prestamo.fechaAutorizacion = fecha_actual
         cuenta.saldo += prestamo.montoPrestamo
-
-        numero_documento = generar_numero_documento(db)
-
-        transaccion = models.Transaccion(
-            numeroDocumento=numero_documento,
+        num_doc = generar_numero_documento(db)
+        trans = models.Transaccion(
+            numeroDocumento=num_doc,
             idCuentaOrigen=None,
             idCuentaDestino=cuenta.idCuenta,
-            idTipoTransaccion=4,  # ID 4 = PRÉSTAMO
+            idTipoTransaccion=4,
             monto=prestamo.montoPrestamo,
-            descripcion=f"Acreditación de préstamo {prestamo.numeroPrestamo}"
+            descripcion=f"Acreditación préstamo {prestamo.numeroPrestamo}",
         )
-        db.add(transaccion)
-        db.flush()
-
-        historial = models.Historial(
-            idCuenta=cuenta.idCuenta,
-            idTransaccion=transaccion.idTransaccion,
-            numeroDocumento=numero_documento,
-            monto=prestamo.montoPrestamo,
-            saldo=cuenta.saldo
+        db.add(trans); db.flush()
+        db.add(
+            models.Historial(
+                idCuenta=cuenta.idCuenta,
+                idTransaccion=trans.idTransaccion,
+                numeroDocumento=num_doc,
+                monto=prestamo.montoPrestamo,
+                saldo=cuenta.saldo,
+            )
         )
-        db.add(historial)
-
-        # Enviar correo de confirmación
-        cliente = db.query(models.Cliente).filter_by(idCliente=prestamo.idCliente).first()
-        if cliente and cliente.correo:
-            try:
-                send_email(
-                    subject="Préstamo aprobado",
-                    recipient=cliente.correo,
-                    body=f"Hola {cliente.primerNombre},\n\nTu préstamo con número {prestamo.numeroPrestamo} ha sido aprobado y el monto ha sido acreditado a tu cuenta."
-                )
-            except Exception as e:
-                print(f"Error enviando correo: {e}")
-    else:
-        prestamo.fechaAutorizacion = fecha_actual  # solo actualiza la fecha, pero no mueve saldo
-
     db.commit()
 
-    return {
-        "mensaje": f"Préstamo {'aprobado' if data.aprobar else 'rechazado'} correctamente.",
-        "numeroPrestamo": prestamo.numeroPrestamo
-    }
+    return {"mensaje": f"Préstamo {'aprobado' if data.aprobar else 'rechazado'} correctamente."}
 
 
 @router.post("/prestamos/pagar")
 def pagar_prestamo(
     data: schemas.PagoPrestamo,
     db: Session = Depends(get_db),
-    user: dict = Depends(get_current_user)
+    user: dict = Depends(get_current_user),
 ):
     usuario = db.query(models.Usuario).filter_by(username=user["username"]).first()
     if not usuario or usuario.rol != "cliente":
-        raise HTTPException(status_code=403, detail="Acceso denegado")
+        raise HTTPException(403, "Acceso denegado")
 
-    prestamo = db.query(models.PrestamoEncabezado).filter_by(numeroPrestamo=data.numeroPrestamo).first()
+    prestamo = (
+        db.query(models.PrestamoEncabezado)
+        .filter_by(numeroPrestamo=data.numeroPrestamo)
+        .first()
+    )
     if not prestamo or prestamo.fechaAutorizacion is None:
-        raise HTTPException(status_code=404, detail="Préstamo no válido o no aprobado")
+        raise HTTPException(404, "Préstamo no válido o no aprobado")
 
-    cuenta = db.query(models.Cuenta).filter_by(numeroCuenta=data.numeroCuentaOrigen, idCliente=usuario.idCliente).first()
+    cuenta = (
+        db.query(models.Cuenta)
+        .filter_by(numeroCuenta=data.numeroCuentaOrigen, idCliente=usuario.idCliente)
+        .first()
+    )
     if not cuenta:
-        raise HTTPException(status_code=404, detail="Cuenta inválida o no pertenece al cliente")
+        raise HTTPException(404, "Cuenta inválida o no pertenece al cliente")
 
-    monto_disponible = Decimal(str(data.montoPago))
-    if cuenta.saldo < monto_disponible:
-        raise HTTPException(status_code=400, detail="Saldo insuficiente")
+    monto_disp = Decimal(str(data.montoPago))
+    if cuenta.saldo < monto_disp:
+        raise HTTPException(400, "Saldo insuficiente")
 
-    cuotas = db.query(models.PrestamoDetalle).filter_by(idPrestamoEnc=prestamo.idPrestamoEnc, estado="VIGENTE").order_by(models.PrestamoDetalle.numeroCuota).all()
+    cuotas = (
+        db.query(models.PrestamoDetalle)
+        .filter_by(idPrestamoEnc=prestamo.idPrestamoEnc, estado="VIGENTE")
+        .order_by(models.PrestamoDetalle.numeroCuota)
+        .all()
+    )
     if not cuotas:
-        raise HTTPException(status_code=400, detail="No hay cuotas pendientes")
+        raise HTTPException(400, "No hay cuotas pendientes")
 
-    documento_pago = generar_numero_documento_pago(db)
-    fecha_actual = date.today()
-    forma_pago_id = 1  # Por defecto, por ejemplo 1 = Débito en cuenta
-
-    total_capital, total_interes, total_mora = Decimal("0.00"), Decimal("0.00"), Decimal("0.00")
-    cuotas_pagadas = 0
-
-    movimiento_enc = models.MovimientoPagoEncabezado(
-        documentoPago=documento_pago,
-        fechaPago=fecha_actual,
+    doc_pago = generar_numero_documento_pago(db)
+    fecha_hoy = date.today()
+    mov_enc = models.MovimientoPagoEncabezado(
+        documentoPago=doc_pago,
+        fechaPago=fecha_hoy,
         idPrestamoEnc=prestamo.idPrestamoEnc,
-        idFormaPago=forma_pago_id,
+        idFormaPago=1,
         cantidadCuotasPaga=0,
-        descripcionPago=f"Pago aplicado automáticamente por Q{monto_disponible}",
+        descripcionPago=f"Pago Q{monto_disp}",
         pagoMontoCapital=Decimal("0.00"),
         pagoMontoInteres=Decimal("0.00"),
         pagoMora=Decimal("0.00"),
         totalPago=Decimal("0.00"),
-        estado="VIGENTE"
+        estado="VIGENTE",
     )
-    db.add(movimiento_enc)
-    db.flush()  # Obtener idMovimientoEnc
+    db.add(mov_enc); db.flush()
 
-    for cuota in cuotas:
-        if monto_disponible <= 0:
+    cap, inte, mora = Decimal("0.00"), Decimal("0.00"), Decimal("0.00")
+    pagadas = 0
+    for c in cuotas:
+        if monto_disp <= 0:
             break
-
-        total_cuota = cuota.totalAPagar
-        capital = cuota.montoCapital
-        interes = cuota.montoIntereses
-        mora = Decimal("0.00")  # En este ejemplo no se aplica aún mora real
-
-        if monto_disponible >= total_cuota:
-            pago_capital = capital
-            pago_interes = interes
-            pago_mora = mora
-            monto_aplicado = total_cuota
-
-            cuota.estado = "CANCELADO"
-            cuota.fechaCancelado = fecha_actual
-            cuota.documentoPago = documento_pago
-            cuotas_pagadas += 1
-
+        total_cuota = c.totalAPagar
+        if monto_disp >= total_cuota:
+            pago_cap = c.montoCapital
+            pago_int = c.montoIntereses
+            pago_mor = Decimal("0.00")
+            applied = total_cuota
+            c.estado = "CANCELADO"
+            c.fechaCancelado = fecha_hoy
+            c.documentoPago = doc_pago
+            pagadas += 1
         else:
-            restante = monto_disponible
-            pago_interes = min(restante, interes)
-            restante -= pago_interes
+            pago_int = min(monto_disp, c.montoIntereses)
+            monto_disp -= pago_int
+            pago_cap = min(monto_disp, c.montoCapital)
+            monto_disp -= pago_cap
+            pago_mor = Decimal("0.00")
+            applied = pago_int + pago_cap
 
-            pago_capital = min(restante, capital)
-            restante -= pago_capital
-
-            pago_mora = Decimal("0.00")
-            monto_aplicado = pago_interes + pago_capital
-
-        detalle = models.MovimientoPagoDetalle(
-            idMovimientoPagoEnc=movimiento_enc.idMovimientoEnc,
-            idPrestamoEnc=prestamo.idPrestamoEnc,
-            idPrestamoDet=cuota.idPrestamoDet,
-            numeroCuota=cuota.numeroCuota,
-            pagoMontoCapital=pago_capital,
-            pagoMontoIntereses=pago_interes,
-            pagoMoraCuota=pago_mora,
-            totalPago=monto_aplicado,
-            estado="VIGENTE"
-        )
-        db.add(detalle)
-
-        total_capital += pago_capital
-        total_interes += pago_interes
-        total_mora += pago_mora
-        monto_disponible -= monto_aplicado
-        prestamo.saldoPrestamo -= monto_aplicado
-        cuenta.saldo -= monto_aplicado
-
-    movimiento_enc.cantidadCuotasPaga = cuotas_pagadas
-    movimiento_enc.pagoMontoCapital = total_capital
-    movimiento_enc.pagoMontoInteres = total_interes
-    movimiento_enc.pagoMora = total_mora
-    movimiento_enc.totalPago = total_capital + total_interes + total_mora
-
-    tipo_transaccion = db.query(models.TipoTransaccion).filter_by(nombre="PAGO PRÉSTAMO").first()
-    transaccion = models.Transaccion(
-        numeroDocumento=documento_pago,
-        idCuentaOrigen=cuenta.idCuenta,
-        idCuentaDestino=None,
-        idTipoTransaccion=tipo_transaccion.idTipoTransaccion,
-        monto=total_capital + total_interes + total_mora,
-        descripcion=f"Pago préstamo {prestamo.numeroPrestamo}"
-    )
-    db.add(transaccion)
-    db.flush()
-
-    historial = models.Historial(
-        idCuenta=cuenta.idCuenta,
-        idTransaccion=transaccion.idTransaccion,
-        numeroDocumento=documento_pago,
-        monto=total_capital + total_interes + total_mora,
-        saldo=cuenta.saldo
-    )
-    db.add(historial)
-
-    cliente = db.query(models.Cliente).filter_by(idCliente=usuario.idCliente).first()
-    if cliente and cliente.correo:
-        try:
-            send_email(
-                subject="Pago recibido",
-                recipient=cliente.correo,
-                body=f"Hola {cliente.primerNombre},\n\nSe registró correctamente el pago de Q{(total_capital + total_interes + total_mora):.2f} a tu préstamo {prestamo.numeroPrestamo}. Gracias por tu cumplimiento."
+        db.add(
+            models.MovimientoPagoDetalle(
+                idMovimientoPagoEnc=mov_enc.idMovimientoEnc,
+                idPrestamoEnc=prestamo.idPrestamoEnc,
+                idPrestamoDet=c.idPrestamoDet,
+                numeroCuota=c.numeroCuota,
+                pagoMontoCapital=pago_cap,
+                pagoMontoIntereses=pago_int,
+                pagoMoraCuota=pago_mor,
+                totalPago=applied,
+                estado="VIGENTE",
             )
-        except Exception as e:
-            print(f"Error enviando correo: {e}")
+        )
+        cap += pago_cap
+        inte += pago_int
+        mora += pago_mor
+        prestamo.saldoPrestamo -= applied
+        cuenta.saldo -= applied
 
+    mov_enc.cantidadCuotasPaga = pagadas
+    mov_enc.pagoMontoCapital = cap
+    mov_enc.pagoMontoInteres = inte
+    mov_enc.pagoMora = mora
+    mov_enc.totalPago = cap + inte + mora
     db.commit()
 
     return {
         "mensaje": "Pago aplicado correctamente",
-        "documento": documento_pago,
-        "cuotasPagadas": cuotas_pagadas,
-        "capitalPagado": float(total_capital),
-        "interesPagado": float(total_interes),
+        "documento": doc_pago,
+        "cuotasPagadas": pagadas,
+        "capitalPagado": float(cap),
+        "interesPagado": float(inte),
         "saldoPrestamo": float(prestamo.saldoPrestamo),
-        "saldoCuenta": float(cuenta.saldo)
+        "saldoCuenta": float(cuenta.saldo),
     }
 
-@router.get("/instituciones")
-def listar_instituciones(db: Session = Depends(get_db)):
-    instituciones = db.query(models.Institucion).all()
-    return [{"id": inst.idInstitucion, "descripcion": inst.descripcion} for inst in instituciones]
 
-@router.get("/tipos-prestamo")
-def listar_tipos_prestamo(db: Session = Depends(get_db)):
-    tipos = db.query(models.TipoPrestamo).all()
-    return [{"id": tipo.idTipoPrestamo, "descripcion": tipo.descripcion} for tipo in tipos]
-
-@router.get("/plazos")
-def listar_plazos(db: Session = Depends(get_db)):
-    plazos = db.query(models.Plazo).all()
-    return [{
-        "id": p.idPlazo,
-        "descripcion": p.descripcion,
-        "cantidadCuotas": p.cantidadCuotas,
-        "interesAnual": float(p.porcentajeAnualIntereses),
-        "porcentajeMora": float(p.porcentajeMora)
-    } for p in plazos]
-
-@router.get("/monedas")
-def listar_monedas(db: Session = Depends(get_db)):
-    monedas = db.query(models.Moneda).all()
-    return [{"id": m.idMoneda, "nombre": m.nombre, "codigo": m.codigo} for m in monedas]
-
-@router.get(
-    "/prestamos/mis-filtrados",
-    response_model=list[schemas.PrestamoOut],
-    summary="Lista los préstamos del cliente con filtros opcionales"
-)
-def listar_prestamos_filtrados(
-    numero_prestamo: Optional[str] = Query(None, description="Buscar por fragmento de número de préstamo"),
-    estado:         Optional[str] = Query(None, regex="^(APROBADO|PENDIENTE)$"),
-    id_tipo_prestamo: Optional[int] = Query(None),
-    id_institucion:  Optional[int] = Query(None),
-    fecha_inicio:    Optional[date] = Query(None),
-    fecha_fin:       Optional[date] = Query(None),
-
-    db:           Session = Depends(get_db),
-    current_user: dict    = Depends(get_current_user),
+@router.get("/prestamos/mis", response_model=List[schemas.PrestamoOut])
+def listar_prestamos_cliente(
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
-    # 1. Validar cliente
     usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
     if not usuario or usuario.rol != "cliente":
         raise HTTPException(403, "Acceso denegado")
 
-    # 2. Build base query con las relaciones
-    q = (
+    prestamos = (
         db.query(models.PrestamoEncabezado)
-          .options(
-              joinedload(models.PrestamoEncabezado.institucion),
-              joinedload(models.PrestamoEncabezado.tipoPrestamo),
-              joinedload(models.PrestamoEncabezado.plazo),
-              joinedload(models.PrestamoEncabezado.moneda),
-              joinedload(models.PrestamoEncabezado.cuentaDestino),
-          )
-          .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+        .options(
+            joinedload(models.PrestamoEncabezado.institucion),
+            joinedload(models.PrestamoEncabezado.tipoPrestamo),
+            joinedload(models.PrestamoEncabezado.plazo),
+            joinedload(models.PrestamoEncabezado.moneda),
+            joinedload(models.PrestamoEncabezado.cuentaDestino),
+        )
+        .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+        .order_by(models.PrestamoEncabezado.fechaPrestamo.desc())
+        .all()
     )
 
-    # 3. Aplicar filtros si vienen
+    return [
+        {
+            "numeroPrestamo":    p.numeroPrestamo,
+            "fechaPrestamo":     p.fechaPrestamo,
+            "fechaAutorizacion": p.fechaAutorizacion,
+            "fechaVencimiento":  p.fechaVencimiento,
+            "montoPrestamo":     float(p.montoPrestamo),
+            "saldoPrestamo":     float(p.saldoPrestamo),
+            "institucion":       p.institucion.descripcion,
+            "tipoPrestamo":      p.tipoPrestamo.descripcion,
+            "moneda":            p.moneda.nombre,
+            "plazo":             p.plazo.descripcion,
+            "cuentaDestino":     p.cuentaDestino.numeroCuenta,  # <— aquí
+            "estado":            "APROBADO" if p.fechaAutorizacion else "PENDIENTE",
+        }
+        for p in prestamos
+    ]
+
+
+@router.get(
+    "/prestamos/mis-filtrados",
+    response_model=List[schemas.PrestamoOut],
+    summary="Lista los préstamos del cliente con filtros opcionales",
+)
+def listar_prestamos_filtrados(
+    numero_prestamo: Optional[str] = Query(None),
+    estado: Optional[str] = Query(None, regex="^(APROBADO|PENDIENTE)$"),
+    id_tipo_prestamo: Optional[int] = Query(None),
+    id_institucion: Optional[int] = Query(None),
+    fecha_inicio: Optional[date] = Query(None),
+    fecha_fin: Optional[date] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
+    if not usuario or usuario.rol != "cliente":
+        raise HTTPException(403, "Acceso denegado")
+
+    q = (
+        db.query(models.PrestamoEncabezado)
+        .options(
+            joinedload(models.PrestamoEncabezado.institucion),
+            joinedload(models.PrestamoEncabezado.tipoPrestamo),
+            joinedload(models.PrestamoEncabezado.plazo),
+            joinedload(models.PrestamoEncabezado.moneda),
+            joinedload(models.PrestamoEncabezado.cuentaDestino),
+        )
+        .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+    )
     if numero_prestamo:
         q = q.filter(models.PrestamoEncabezado.numeroPrestamo.ilike(f"%{numero_prestamo}%"))
     if estado == "APROBADO":
@@ -403,7 +357,6 @@ def listar_prestamos_filtrados(
 
     prestamos = q.order_by(models.PrestamoEncabezado.fechaPrestamo.desc()).all()
 
-    # 4. Volcar al schema PrestamoOut
     return [
         {
             "numeroPrestamo":    p.numeroPrestamo,
@@ -416,16 +369,16 @@ def listar_prestamos_filtrados(
             "tipoPrestamo":      p.tipoPrestamo.descripcion,
             "moneda":            p.moneda.nombre,
             "plazo":             p.plazo.descripcion,
-            "CuentaDestino":     p.cuentaDestino.numeroCuenta,
+            "cuentaDestino":     p.cuentaDestino.numeroCuenta,  # <— aquí también
             "estado":            "APROBADO" if p.fechaAutorizacion else "PENDIENTE",
         }
         for p in prestamos
     ]
 
+
 @router.get("/prestamos/mis-pagos", response_model=List[schemas.PagoPrestamoOut])
 def listar_pagos_cliente(
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
     if not usuario or usuario.rol != "cliente":
@@ -433,24 +386,24 @@ def listar_pagos_cliente(
 
     pagos = (
         db.query(models.MovimientoPagoEncabezado)
-          .join(models.PrestamoEncabezado)
-          .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
-          .options(joinedload(models.MovimientoPagoEncabezado.prestamoEncabezado))
-          .order_by(models.MovimientoPagoEncabezado.fechaPago.desc())
-          .all()
+        .join(models.PrestamoEncabezado)
+        .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+        .options(joinedload(models.MovimientoPagoEncabezado.prestamoEncabezado))
+        .order_by(models.MovimientoPagoEncabezado.fechaPago.desc())
+        .all()
     )
 
     return [
         schemas.PagoPrestamoOut(
-            documentoPago      = p.documentoPago,
-            fechaPago          = p.fechaPago,
-            numeroPrestamo     = p.prestamoEncabezado.numeroPrestamo,
-            cantidadCuotasPaga = p.cantidadCuotasPaga,
-            pagoMontoCapital   = p.pagoMontoCapital,
-            pagoMontoInteres   = p.pagoMontoInteres,
-            pagoMora           = p.pagoMora,
-            totalPago          = p.totalPago,
-            estado             = p.estado
+            documentoPago=p.documentoPago,
+            fechaPago=p.fechaPago,
+            numeroPrestamo=p.prestamoEncabezado.numeroPrestamo,
+            cantidadCuotasPaga=p.cantidadCuotasPaga,
+            pagoMontoCapital=p.pagoMontoCapital,
+            pagoMontoInteres=p.pagoMontoInteres,
+            pagoMora=p.pagoMora,
+            totalPago=p.totalPago,
+            estado=p.estado,
         )
         for p in pagos
     ]
@@ -462,8 +415,7 @@ def listar_pagos_filtrados(
     fecha_inicio:    Optional[date]  = Query(None),
     fecha_fin:       Optional[date]  = Query(None),
     estado:          Optional[str]   = Query(None),
-    db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
 ):
     usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
     if not usuario or usuario.rol != "cliente":
@@ -471,11 +423,10 @@ def listar_pagos_filtrados(
 
     q = (
         db.query(models.MovimientoPagoEncabezado)
-          .join(models.PrestamoEncabezado)
-          .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
-          .options(joinedload(models.MovimientoPagoEncabezado.prestamoEncabezado))
+        .join(models.PrestamoEncabezado)
+        .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+        .options(joinedload(models.MovimientoPagoEncabezado.prestamoEncabezado))
     )
-
     if numero_prestamo:
         q = q.filter(models.PrestamoEncabezado.numeroPrestamo.ilike(f"%{numero_prestamo}%"))
     if fecha_inicio:
@@ -489,15 +440,15 @@ def listar_pagos_filtrados(
 
     return [
         schemas.PagoPrestamoOut(
-            documentoPago      = p.documentoPago,
-            fechaPago          = p.fechaPago,
-            numeroPrestamo     = p.prestamoEncabezado.numeroPrestamo,
-            cantidadCuotasPaga = p.cantidadCuotasPaga,
-            pagoMontoCapital   = p.pagoMontoCapital,
-            pagoMontoInteres   = p.pagoMontoInteres,
-            pagoMora           = p.pagoMora,
-            totalPago          = p.totalPago,
-            estado             = p.estado
+            documentoPago=p.documentoPago,
+            fechaPago=p.fechaPago,
+            numeroPrestamo=p.prestamoEncabezado.numeroPrestamo,
+            cantidadCuotasPaga=p.cantidadCuotasPaga,
+            pagoMontoCapital=p.pagoMontoCapital,
+            pagoMontoInteres=p.pagoMontoInteres,
+            pagoMora=p.pagoMora,
+            totalPago=p.totalPago,
+            estado=p.estado,
         )
         for p in pagos
     ]
