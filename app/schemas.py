@@ -1,6 +1,6 @@
 #app/schemas.py
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, date
 from decimal import Decimal
 
@@ -119,6 +119,14 @@ class TransaccionOut(BaseModel):
     monto: float
     descripcion: Optional[str] = None
 
+class TransaccionesListOut(BaseModel):
+    username: str
+    rol: str
+    transacciones: List[TransaccionOut]
+
+    class Config:
+        orm_mode = True
+
 
 class PagoPrestamoOut(BaseModel):
     documentoPago: str
@@ -171,3 +179,4 @@ class CuotaOut(BaseModel):
     model_config = {
         "from_attributes": True
     }
+

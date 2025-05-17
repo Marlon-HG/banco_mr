@@ -9,6 +9,8 @@ from app import models, schemas, auth, email_utils
 from app.database import SessionLocal
 from app.utils import generate_document_number, convert_currency
 import os
+from app.schemas import TransaccionOut, TransaccionesListOut
+from typing import Optional, List
 router = APIRouter()
 
 def get_db():
@@ -421,39 +423,64 @@ def listar_transacciones(
     ]
 
 
-@router.get("/transacciones/mis")
-def listar_transacciones_cliente(
+@router.get(
+    "/mis",
+    response_model=TransaccionesListOut,
+    summary="Lista tus transacciones (o todas si eres admin)"
+)
+def listar_transacciones(
     db: Session = Depends(get_db),
     current_user: dict = Depends(auth.get_current_user)
 ):
-    # Obtener el usuario
+    # 1. Obtener y validar el usuario
     usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
     if not usuario:
         raise HTTPException(status_code=403, detail="Usuario no válido")
 
-    # Obtener todas las cuentas del cliente
-    cuentas = db.query(models.Cuenta).filter_by(idCliente=usuario.idCliente).all()
-    cuentas_ids = [cuenta.idCuenta for cuenta in cuentas]
+    # 2. Determinar rol (usuario.rol ya es un str)
+    rol_nombre = usuario.rol.lower()
 
-    # Buscar transacciones donde la cuenta esté involucrada (origen o destino)
-    transacciones = db.query(models.Transaccion).filter(
-        (models.Transaccion.idCuentaOrigen.in_(cuentas_ids)) |
-        (models.Transaccion.idCuentaDestino.in_(cuentas_ids))
-    ).order_by(models.Transaccion.fecha.desc()).all()
+    # 3a. Si es admin, traer todas las transacciones
+    if rol_nombre == "admin":
+        transacciones = (
+            db.query(models.Transaccion)
+              .order_by(models.Transaccion.fecha.desc())
+              .all()
+        )
+    # 3b. Si es cliente, traer sólo las de sus cuentas
+    else:
+        cuentas = db.query(models.Cuenta).filter_by(idCliente=usuario.idCliente).all()
+        cuentas_ids = [c.idCuenta for c in cuentas]
 
-    resultados = []
+        transacciones = (
+            db.query(models.Transaccion)
+              .filter(
+                  (models.Transaccion.idCuentaOrigen.in_(cuentas_ids)) |
+                  (models.Transaccion.idCuentaDestino.in_(cuentas_ids))
+              )
+              .order_by(models.Transaccion.fecha.desc())
+              .all()
+        )
+
+    # 4. Construir lista de salida
+    lista = []
     for t in transacciones:
-        cuenta_origen = db.query(models.Cuenta).filter_by(idCuenta=t.idCuentaOrigen).first()
-        cuenta_destino = db.query(models.Cuenta).filter_by(idCuenta=t.idCuentaDestino).first()
+        cuenta_origen = db.query(models.Cuenta).get(t.idCuentaOrigen)
+        cuenta_destino = db.query(models.Cuenta).get(t.idCuentaDestino)
 
-        resultados.append({
-            "numeroDocumento": t.numeroDocumento,
-            "fecha": t.fecha,
-            "numeroCuentaOrigen": cuenta_origen.numeroCuenta if cuenta_origen else None,
-            "numeroCuentaDestino": cuenta_destino.numeroCuenta if cuenta_destino else None,
-            "tipoTransaccion": t.tipoTransaccion.nombre,
-            "monto": float(t.monto),
-            "descripcion": t.descripcion
-        })
+        lista.append(TransaccionOut(
+            numeroDocumento=t.numeroDocumento,
+            fecha=t.fecha,
+            cuentaOrigen=cuenta_origen.numeroCuenta if cuenta_origen else None,
+            cuentaDestino=cuenta_destino.numeroCuenta if cuenta_destino else None,
+            tipoTransaccion=t.tipoTransaccion.nombre,
+            monto=float(t.monto),
+            descripcion=t.descripcion
+        ))
 
-    return resultados
+    # 5. Devolver username, rol y transacciones
+    return TransaccionesListOut(
+        username=usuario.username,
+        rol=usuario.rol,
+        transacciones=lista
+    )
