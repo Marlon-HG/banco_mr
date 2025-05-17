@@ -1,4 +1,5 @@
 # app/routers/prestamo.py
+import os
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
 from datetime import date
@@ -87,13 +88,49 @@ def solicitar_prestamo(
     cliente = db.query(models.Cliente).filter_by(idCliente=usuario.idCliente).first()
     if cliente and cliente.correo:
         try:
-            send_email(
-                subject="Solicitud de préstamo recibida",
-                recipient=cliente.correo,
-                body=f"Hola {cliente.primerNombre}, tu solicitud {numero_prestamo} está pendiente de aprobación.",
-            )
-        except:
+            subject = "Banco M&R – Confirmación de solicitud de préstamo"
+            html_body = f"""
+                <html>
+                  <body style="font-family:Arial,sans-serif; color:#333;">
+                    <p>Estimado/a <strong>{cliente.primerNombre} {cliente.primerApellido}</strong>,</p>
+                <p>
+                  Le confirmamos que hemos recibido su solicitud de préstamo con número:<br>
+                  <strong>{numero_prestamo}</strong>
+                </p>
+                <p>Detalles de la solicitud:</p>
+                <ul>
+                  <li><strong>Fecha de solicitud:</strong> {fecha_actual.strftime('%d/%m/%Y')}</li>
+                  <li><strong>Monto solicitado:</strong> Q{float(data.montoPrestamo):,.2f}</li>
+                  <li><strong>Plazo:</strong> {plazo.descripcion} ({plazo.cantidadCuotas} cuotas)</li>
+                  <li><strong>Vencimiento estimado:</strong> {fecha_vencimiento.strftime('%d/%m/%Y')}</li>
+                </ul>
+                <p>
+                  Actualmente su solicitud está en estado <strong>PENDIENTE</strong> de aprobación.
+                  Le notificaremos en cuanto se procese.
+                </p>
+                <p>
+                  Para consultas, responda a este correo o contáctenos a través de nuestros canales de atención.
+                </p>
+                <br>
+                <p>Saludos cordiales,<br>Equipo de Banco M&amp;R</p>
+                    <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+                    <div style="text-align:center;">
+                      <!-- Referencia al CID del logo -->
+                      <img
+                        src="cid:logo_cid"
+                        alt="Logo Banco M&R"
+                        style="width:120px;"
+                      />
+                    </div>
+                  </body>
+                </html>
+                """
+            # Construye la ruta absoluta al logo en tu proyecto
+            logo_path = os.path.join(os.path.dirname(__file__), "..", "Logo.png")
+            send_email(subject, cliente.correo, html_body, logo_path=logo_path)
+        except Exception:
             pass
+
 
     return {"mensaje": "Solicitud de préstamo registrada y cuotas generadas.", "numeroPrestamo": numero_prestamo}
 
@@ -160,23 +197,21 @@ def pagar_prestamo(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
+    # 1) Validar cliente y préstamo
     usuario = db.query(models.Usuario).filter_by(username=user["username"]).first()
     if not usuario or usuario.rol != "cliente":
         raise HTTPException(403, "Acceso denegado")
 
-    prestamo = (
-        db.query(models.PrestamoEncabezado)
-        .filter_by(numeroPrestamo=data.numeroPrestamo)
-        .first()
-    )
+    prestamo = db.query(models.PrestamoEncabezado).filter_by(
+        numeroPrestamo=data.numeroPrestamo
+    ).first()
     if not prestamo or prestamo.fechaAutorizacion is None:
         raise HTTPException(404, "Préstamo no válido o no aprobado")
 
-    cuenta = (
-        db.query(models.Cuenta)
-        .filter_by(numeroCuenta=data.numeroCuentaOrigen, idCliente=usuario.idCliente)
-        .first()
-    )
+    # 2) Validar cuenta y saldo
+    cuenta = db.query(models.Cuenta).filter_by(
+        numeroCuenta=data.numeroCuentaOrigen, idCliente=usuario.idCliente
+    ).first()
     if not cuenta:
         raise HTTPException(404, "Cuenta inválida o no pertenece al cliente")
 
@@ -184,91 +219,108 @@ def pagar_prestamo(
     if cuenta.saldo < monto_disp:
         raise HTTPException(400, "Saldo insuficiente")
 
+    # 3) Obtener cuotas vigentes, ordenadas por número de cuota
     cuotas = (
         db.query(models.PrestamoDetalle)
-        .filter_by(idPrestamoEnc=prestamo.idPrestamoEnc, estado="VIGENTE")
-        .order_by(models.PrestamoDetalle.numeroCuota)
-        .all()
+          .filter_by(idPrestamoEnc=prestamo.idPrestamoEnc, estado="VIGENTE")
+          .order_by(models.PrestamoDetalle.numeroCuota)
+          .all()
     )
     if not cuotas:
         raise HTTPException(400, "No hay cuotas pendientes")
 
+    # 4) Crear encabezado de movimiento de pago
     doc_pago = generar_numero_documento_pago(db)
     fecha_hoy = date.today()
     mov_enc = models.MovimientoPagoEncabezado(
         documentoPago=doc_pago,
         fechaPago=fecha_hoy,
         idPrestamoEnc=prestamo.idPrestamoEnc,
-        idFormaPago=1,
-        cantidadCuotasPaga=0,
-        descripcionPago=f"Pago Q{monto_disp}",
+        idFormaPago=1,  # Ajusta según tu lógica
+        cantidadCuotasPaga=0,  # se irá actualizando
+        descripcionPago=f"Pago préstamo {data.numeroPrestamo}",
         pagoMontoCapital=Decimal("0.00"),
         pagoMontoInteres=Decimal("0.00"),
         pagoMora=Decimal("0.00"),
         totalPago=Decimal("0.00"),
         estado="VIGENTE",
     )
-    db.add(mov_enc); db.flush()
+    db.add(mov_enc)
+    db.flush()  # para obtener mov_enc.idMovimientoEnc
 
-    cap, inte, mora = Decimal("0.00"), Decimal("0.00"), Decimal("0.00")
-    pagadas = 0
-    for c in cuotas:
+    # 5) Iterar cuota a cuota, aplicando hasta agotar monto_disp
+    total_capital, total_interes, total_mora = Decimal("0.00"), Decimal("0.00"), Decimal("0.00")
+    cuotas_pagadas = 0
+
+    for cuota in cuotas:
         if monto_disp <= 0:
             break
-        total_cuota = c.totalAPagar
+
+        total_cuota = cuota.totalAPagar
+
         if monto_disp >= total_cuota:
-            pago_cap = c.montoCapital
-            pago_int = c.montoIntereses
+            # pago completo de esta cuota
+            pago_cap = cuota.montoCapital
+            pago_int = cuota.montoIntereses
             pago_mor = Decimal("0.00")
-            applied = total_cuota
-            c.estado = "CANCELADO"
-            c.fechaCancelado = fecha_hoy
-            c.documentoPago = doc_pago
-            pagadas += 1
+            aplicado = total_cuota
+
+            cuota.estado = "CANCELADO"
+            cuota.fechaCancelado = fecha_hoy
+            cuota.documentoPago = doc_pago
+            cuotas_pagadas += 1
         else:
-            pago_int = min(monto_disp, c.montoIntereses)
-            monto_disp -= pago_int
-            pago_cap = min(monto_disp, c.montoCapital)
-            monto_disp -= pago_cap
+            # pago parcial de la cuota actual (opcional de permitir)
+            pago_int = min(monto_disp, cuota.montoIntereses)
+            restante = monto_disp - pago_int
+            pago_cap = min(restante, cuota.montoCapital)
             pago_mor = Decimal("0.00")
-            applied = pago_int + pago_cap
+            aplicado = pago_int + pago_cap
 
-        db.add(
-            models.MovimientoPagoDetalle(
-                idMovimientoPagoEnc=mov_enc.idMovimientoEnc,
-                idPrestamoEnc=prestamo.idPrestamoEnc,
-                idPrestamoDet=c.idPrestamoDet,
-                numeroCuota=c.numeroCuota,
-                pagoMontoCapital=pago_cap,
-                pagoMontoIntereses=pago_int,
-                pagoMoraCuota=pago_mor,
-                totalPago=applied,
-                estado="VIGENTE",
-            )
+            # dejamos esta cuota como VIGENTE (o podrías marcar 'PARCIAL' si lo modelas)
+            # cuota.estado = "VIGENTE"
+
+        # insertar detalle
+        detalle = models.MovimientoPagoDetalle(
+            idMovimientoPagoEnc=mov_enc.idMovimientoEnc,
+            idPrestamoEnc=prestamo.idPrestamoEnc,
+            idPrestamoDet=cuota.idPrestamoDet,
+            numeroCuota=cuota.numeroCuota,
+            pagoMontoCapital=pago_cap,
+            pagoMontoIntereses=pago_int,
+            pagoMoraCuota=pago_mor,
+            totalPago=aplicado,
+            estado="VIGENTE",
         )
-        cap += pago_cap
-        inte += pago_int
-        mora += pago_mor
-        prestamo.saldoPrestamo -= applied
-        cuenta.saldo -= applied
+        db.add(detalle)
 
-    mov_enc.cantidadCuotasPaga = pagadas
-    mov_enc.pagoMontoCapital = cap
-    mov_enc.pagoMontoInteres = inte
-    mov_enc.pagoMora = mora
-    mov_enc.totalPago = cap + inte + mora
+        # acumular y ajustar montos
+        total_capital += pago_cap
+        total_interes += pago_int
+        total_mora += pago_mor
+        prestamo.saldoPrestamo -= aplicado
+        cuenta.saldo -= aplicado
+        monto_disp -= aplicado
+
+    # 6) Actualizar resumen en el encabezado
+    mov_enc.cantidadCuotasPaga = cuotas_pagadas
+    mov_enc.pagoMontoCapital = total_capital
+    mov_enc.pagoMontoInteres = total_interes
+    mov_enc.pagoMora = total_mora
+    mov_enc.totalPago = total_capital + total_interes + total_mora
+
     db.commit()
 
     return {
         "mensaje": "Pago aplicado correctamente",
         "documento": doc_pago,
-        "cuotasPagadas": pagadas,
-        "capitalPagado": float(cap),
-        "interesPagado": float(inte),
+        "cuotasPagadas": cuotas_pagadas,
+        "capitalPagado": float(total_capital),
+        "interesPagado": float(total_interes),
+        "moraPagada": float(total_mora),
         "saldoPrestamo": float(prestamo.saldoPrestamo),
         "saldoCuenta": float(cuenta.saldo),
     }
-
 
 @router.get("/prestamos/mis", response_model=List[schemas.PrestamoOut])
 def listar_prestamos_cliente(

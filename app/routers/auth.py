@@ -5,7 +5,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 import secrets
 from datetime import timedelta, datetime
-
+import os
 from app.database import get_db
 from app import models, schemas, auth, email_utils
 
@@ -74,22 +74,67 @@ def register(
     db.refresh(nuevo_usuario)
 
     # 4. Enviar correo con credenciales
-    subject = "Bienvenido a Banco M&R - Confirmación de Registro"
-    body = (
-        f"Estimado {user.cliente.primerNombre} {user.cliente.primerApellido},\n\n"
-        "Su registro ha sido exitoso.\n\n"
-        f"Usuario: {generated_username}\n"
-        f"Contraseña: {raw_password}\n\n"
-        "Por favor cambie su contraseña la primera vez que ingrese.\n\n"
-        "Saludos,\nEquipo Banco M&R"
-    )
+    subject = "¡Bienvenido(a) a Banco M&R! – Credenciales de Acceso"
+    html_body = f"""
+        <html>
+          <body style="font-family:Arial,sans-serif; color:#333;">
+            <h1 style="color:#1a73e8;">¡Bienvenido(a) a Banco M&amp;R!</h1>
+            <p>Estimado(a) <strong>{user.cliente.primerNombre} {user.cliente.primerApellido}</strong>,</p>
+            <p>
+              Nos complace informarle que su registro en nuestra plataforma se ha completado con éxito. 
+              A continuación encontrará sus credenciales de acceso:
+            </p>
+            <table style="border-collapse:collapse; width:100%; max-width:400px;">
+              <tr>
+                <td style="padding:8px; border:1px solid #ddd; background:#f9f9f9;"><strong>Usuario</strong></td>
+                <td style="padding:8px; border:1px solid #ddd;">{generated_username}</td>
+              </tr>
+              <tr>
+                <td style="padding:8px; border:1px solid #ddd; background:#f9f9f9;"><strong>Contraseña</strong></td>
+                <td style="padding:8px; border:1px solid #ddd;">{raw_password}</td>
+              </tr>
+            </table>
+            <p>
+              Por seguridad, le recomendamos ingresar al portal y cambiar su contraseña en su primer inicio de sesión.
+            </p>
+            <p style="text-align:center; margin:30px 0;">
+              <a
+                href="https://front-banco-mr.vercel.app/landing/inicio"
+                style="
+                  background-color:#1a73e8;
+                  color:#ffffff;
+                  padding:12px 24px;
+                  text-decoration:none;
+                  border-radius:4px;
+                  font-weight:bold;
+                  display:inline-block;
+                "
+              >Ir al portal de Banco M&amp;R</a>
+            </p>
+            <p style="color:#555;">
+              Si usted no solicitó este registro, por favor ignore este correo.
+            </p>
+            <br>
+            <p style="color:#555;">Saludos cordiales,<br>Equipo Banco M&amp;R</p>
+            <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+            <div style="text-align:center;">
+              <img src="cid:logo_cid" alt="Logo Banco M&R" style="width:120px;" />
+            </div>
+          </body>
+        </html>
+        """
+
+    # Ruta absoluta al logo (ajusta según tu proyecto)
+    logo_path = os.path.join(os.path.dirname(__file__), "..", "Logo.png")
+
     try:
-        email_utils.send_email(subject, user.cliente.correo, body)
-    except Exception:
-        raise HTTPException(status_code=500, detail="No se pudo enviar correo de credenciales")
+        email_utils.send_email(subject, user.cliente.correo, html_body, logo_path=logo_path)
+    except Exception as e:
+        print(f"Error enviando correo de registro: {e}")
+        raise HTTPException(status_code=500, detail="No se pudo enviar el correo con las credenciales")
 
     return {
-        "mensaje": "Usuario registrado correctamente. Revise su correo.",
+        "mensaje": "Usuario registrado correctamente. Revise su correo para acceder.",
         "username": generated_username
     }
 
@@ -116,17 +161,24 @@ def password_reset_request(
     data: schemas.PasswordResetRequest,
     db: Session = Depends(get_db)
 ):
-    cliente = db.query(models.Cliente).filter(
-        models.Cliente.correo == data.correo,
-        models.Cliente.dpi == data.dpi
-    ).first()
+    # 1) Validar cliente y usuario
+    cliente = (
+        db.query(models.Cliente)
+          .filter(models.Cliente.correo == data.correo, models.Cliente.dpi == data.dpi)
+          .first()
+    )
     if not cliente:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
 
-    usuario = db.query(models.Usuario).filter(models.Usuario.idCliente == cliente.idCliente).first()
+    usuario = (
+        db.query(models.Usuario)
+          .filter(models.Usuario.idCliente == cliente.idCliente)
+          .first()
+    )
     if not usuario:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
+    # 2) Generar token y guardarlo
     reset_token = secrets.token_urlsafe(32)
     expiration = datetime.utcnow() + timedelta(hours=1)
     token_entry = models.PasswordResetToken(
@@ -138,15 +190,46 @@ def password_reset_request(
     db.add(token_entry)
     db.commit()
 
+    # 3) Preparar contenido HTML
     reset_link = f"https://front-banco-mr.vercel.app/auth/recupera?token={reset_token}"
-    subject = "Restablecimiento de Contraseña - Banco M&R"
-    body = (
-        "Haga clic en el siguiente enlace para restablecer su contraseña:\n\n"
-        f"{reset_link}\n\n"
-        "El enlace vence en 1 hora."
+    subject = "Restablecimiento de Contraseña | Banco M&R"
+    html_body = f"""
+        <html>
+          <body style="font-family:Arial,sans-serif; color:#333;">
+            <p>Estimado(a) <strong>{cliente.primerNombre} {cliente.primerApellido}</strong>,</p>
+            <p>Hemos recibido una solicitud para restablecer la contraseña de su cuenta en
+               <strong>Banco M&R</strong>. Para continuar, haga clic en el botón:</p>
+            <p style="text-align:center; margin:30px 0;">
+              <a href="{reset_link}" style="
+                    background-color:#1a73e8;
+                    color:#ffffff;
+                    padding:12px 24px;
+                    text-decoration:none;
+                    border-radius:4px;
+                    font-weight:bold;
+                    display:inline-block;
+                  ">Restablecer Contraseña</a>
+            </p>
+            <p>Este enlace expirará en <strong>1 hora</strong>. Si no lo solicitó, ignore este correo.</p>
+            <br>
+            <p>Saludos cordiales,<br>Equipo de Banco M&amp;R</p>
+            <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+            <div style="text-align:center;">
+              <!-- Apunta al Content-ID del logo adjunto -->
+              <img src="cid:logo_cid" alt="Logo Banco M&R" style="width:120px;" />
+            </div>
+          </body>
+        </html>
+        """
+
+    email_utils.send_email(
+        subject,
+        data.correo,
+        html_body,
+        logo_path="app/Logo.png"
     )
-    email_utils.send_email(subject, data.correo, body)
-    return {"mensaje": "Se envió correo para restablecer contraseña"}
+
+    return {"mensaje": "Se ha enviado un correo con instrucciones para restablecer la contraseña."}
 
 
 @router.post("/password-reset", status_code=status.HTTP_200_OK)
