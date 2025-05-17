@@ -415,21 +415,34 @@ def listar_prestamos_filtrados(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user),
 ):
+    # 1) Validar cliente
     usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
     if not usuario or usuario.rol != "cliente":
         raise HTTPException(403, "Acceso denegado")
 
+    # 2) Obtener datos del cliente para el nombre completo
+    cliente = db.query(models.Cliente).filter_by(idCliente=usuario.idCliente).first()
+    nombre_completo = " ".join(filter(None, [
+        cliente.primerNombre,
+        cliente.segundoNombre,
+        cliente.primerApellido,
+        cliente.segundoApellido
+    ]))
+
+    # 3) Construir la consulta base
     q = (
         db.query(models.PrestamoEncabezado)
-        .options(
-            joinedload(models.PrestamoEncabezado.institucion),
-            joinedload(models.PrestamoEncabezado.tipoPrestamo),
-            joinedload(models.PrestamoEncabezado.plazo),
-            joinedload(models.PrestamoEncabezado.moneda),
-            joinedload(models.PrestamoEncabezado.cuentaDestino),
-        )
-        .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
+          .options(
+              joinedload(models.PrestamoEncabezado.institucion),
+              joinedload(models.PrestamoEncabezado.tipoPrestamo),
+              joinedload(models.PrestamoEncabezado.plazo),
+              joinedload(models.PrestamoEncabezado.moneda),
+              joinedload(models.PrestamoEncabezado.cuentaDestino),
+          )
+          .filter(models.PrestamoEncabezado.idCliente == usuario.idCliente)
     )
+
+    # 4) Aplicar filtros
     if numero_prestamo:
         q = q.filter(models.PrestamoEncabezado.numeroPrestamo.ilike(f"%{numero_prestamo}%"))
     if estado == "APROBADO":
@@ -445,6 +458,7 @@ def listar_prestamos_filtrados(
     if fecha_fin:
         q = q.filter(models.PrestamoEncabezado.fechaPrestamo <= fecha_fin)
 
+    # 5) Ejecutar y mapear al esquema
     prestamos = q.order_by(models.PrestamoEncabezado.fechaPrestamo.desc()).all()
 
     return [
@@ -459,8 +473,10 @@ def listar_prestamos_filtrados(
             "tipoPrestamo":      p.tipoPrestamo.descripcion,
             "moneda":            p.moneda.nombre,
             "plazo":             p.plazo.descripcion,
-            "cuentaDestino":     p.cuentaDestino.numeroCuenta,  # <— aquí también
+            "cuentaDestino":     p.cuentaDestino.numeroCuenta,
             "estado":            "APROBADO" if p.fechaAutorizacion else "PENDIENTE",
+            "nombreCliente":     nombre_completo,
+            "observacion":       p.observacion,
         }
         for p in prestamos
     ]

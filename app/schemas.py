@@ -145,9 +145,11 @@ class PrestamoOut(BaseModel):
     institucion: str
     tipoPrestamo: str
     moneda: str
-    estado: str
     plazo: str
     cuentaDestino: str
+    estado: str
+    nombreCliente: str
+    observacion: Optional[str] = None
 
     class Config:
         orm_mode = True
