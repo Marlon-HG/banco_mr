@@ -452,3 +452,50 @@ def listar_pagos_filtrados(
         )
         for p in pagos
     ]
+
+@router.get("/instituciones", response_model=List[schemas.InstitucionOut], summary="Listar todas las instituciones")
+def listar_instituciones(db: Session = Depends(get_db)):
+    instituciones = db.query(models.Institucion).all()
+    return [
+        {
+            "idInstitucion": inst.idInstitucion,
+            "nombre": inst.descripcion
+        }
+        for inst in instituciones
+    ]
+
+@router.get("/tipos-prestamo", response_model=List[schemas.TipoPrestamoOut], summary="Listar todos los tipos de préstamo")
+def listar_tipos_prestamo(db: Session = Depends(get_db)):
+    tipos = db.query(models.TipoPrestamo).all()
+    return [
+        {
+            "idTipoPrestamo": tp.idTipoPrestamo,
+            "nombre": tp.descripcion
+        }
+        for tp in tipos
+    ]
+
+@router.get("/plazos", response_model=List[schemas.PlazoOut], summary="Listar todos los plazos de préstamo")
+def listar_plazos(db: Session = Depends(get_db)):
+    plazos = db.query(models.Plazo).all()
+    return [
+        {
+            "idPlazo": p.idPlazo,
+            "cantidadCuotas": p.cantidadCuotas,
+            "porcentajeAnualIntereses": float(p.porcentajeAnualIntereses),
+            "descripcion": p.descripcion
+        }
+        for p in plazos
+    ]
+
+@router.get("/monedas", response_model=List[schemas.MonedaOut], summary="Listar todos los tipos de moneda")
+def listar_monedas(db: Session = Depends(get_db)):
+    monedas = db.query(models.Moneda).all()
+    return [
+        {
+            "idMoneda": m.idMoneda,
+            "nombre": m.nombre,
+            "simbolo": m.codigo
+        }
+        for m in monedas
+    ]
