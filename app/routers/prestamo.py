@@ -2,7 +2,7 @@
 import os
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
-from datetime import date
+from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 from decimal import Decimal
 from typing import Optional, List
@@ -186,6 +186,53 @@ def aprobar_prestamo(
             )
         )
     db.commit()
+    # 5) Enviar correo al cliente notificando la aprobación
+    cliente = db.query(models.Cliente).filter_by(idCliente=prestamo.idCliente).first()
+    if cliente and cliente.correo and data.aprobar:
+        # Hora actual formateada
+        ahora = datetime.now().strftime("%d/%m/%Y %H:%M")
+        subject = f"Banco M&R – Préstamo {prestamo.numeroPrestamo} Aprobado"
+        html_body = f"""
+            <html>
+              <body style="font-family:Arial,sans-serif; color:#333;">
+                <p>Estimado/a <strong>{cliente.primerNombre} {cliente.primerApellido}</strong>,</p>
+
+                <p>
+                  Nos complace informarle que su solicitud de préstamo
+                  <strong>{prestamo.numeroPrestamo}</strong> ha sido <strong>APROBADA</strong> 
+                  el {fecha_actual.strftime('%d/%m/%Y')} a las {ahora.split()[1]}.
+                </p>
+
+                <p>Detalle de la operación:</p>
+                <ul>
+                  <li><strong>Monto aprobado:</strong> Q{float(prestamo.montoPrestamo):,.2f}</li>
+                  <li><strong>Cuenta acreditada:</strong> {cuenta.numeroCuenta}</li>
+                  <li><strong>Documento:</strong> {num_doc}</li>
+                </ul>
+
+                <p>
+                  El monto ya se encuentra disponible en su cuenta. 
+                  Para cualquier consulta, puede responder a este correo o contactarnos
+                  a través de nuestros canales de atención.
+                </p>
+
+                <br>
+                <p>Saludos cordiales,<br>Equipo Banco M&amp;R</p>
+                <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+                <div style="text-align:center;">
+                  <img src="cid:logo_cid" alt="Logo Banco M&R" style="width:120px;"/>
+                </div>
+              </body>
+            </html>
+            """
+        # Ruta al logo (ajusta si es necesario)
+        logo_path = os.path.join(os.path.dirname(__file__), "..", "Logo.png")
+
+        try:
+            send_email(subject, cliente.correo, html_body, logo_path=logo_path)
+        except Exception:
+            # No interrumpimos si falla el envío de correo
+            pass
 
     return {"mensaje": f"Préstamo {'aprobado' if data.aprobar else 'rechazado'} correctamente."}
 

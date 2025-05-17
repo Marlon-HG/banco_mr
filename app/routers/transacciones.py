@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from app import models, schemas, auth, email_utils
 from app.database import SessionLocal
 from app.utils import generate_document_number, convert_currency
-
+import os
 router = APIRouter()
 
 def get_db():
@@ -81,11 +81,46 @@ def create_transaccion(
         db.commit()
 
         cliente = db.query(models.Cliente).filter_by(idCliente=cuenta_origen.idCliente).first()
-        email_utils.send_email(
-            "Notificación de Depósito - Banco M&R",
-            cliente.correo,
-            f"Hola {cliente.primerNombre}, se ha realizado un depósito de Q{monto} en su cuenta {cuenta_origen.numeroCuenta}.\nDocumento: {numero_documento}"
-        )
+
+        subject = "Banco M&R – Confirmación de Depósito"
+        html_body = f"""
+        <html>
+          <body style="font-family:Arial,sans-serif; color:#333;">
+            <p>Estimado/a <strong>{cliente.primerNombre} {cliente.primerApellido}</strong>,</p>
+
+            <p>
+              Le informamos que su cuenta <strong>{cuenta_origen.numeroCuenta}</strong> ha recibido correctamente
+              un depósito por un monto de <strong>Q{monto:,.2f}</strong>.
+            </p>
+
+            <p>
+              <strong>Detalle de la transacción:</strong><br>
+              • Fecha y hora: {datetime.now().strftime('%d/%m/%Y %H:%M')}<br>
+              • Número de documento: <strong>{numero_documento}</strong>
+            </p>
+
+            <p>
+              Agradecemos su confianza en Banco M&amp;R. Si tiene alguna pregunta, no dude en responder a este correo
+              o contactarse con nuestro equipo de atención al cliente.
+            </p>
+
+            <br>
+            <p>Atentamente,<br>Equipo Banco M&amp;R</p>
+
+            <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+
+            <div style="text-align:center;">
+              <img src="cid:logo_cid" alt="Logo Banco M&R" style="width:120px;"/>
+            </div>
+          </body>
+        </html>
+        """
+
+        # Construye la ruta al logo (ajústala si tu Logo.png está en otra carpeta)
+        logo_path = os.path.join(os.path.dirname(__file__), "..", "Logo.png")
+
+        # Envía el correo en HTML con logo inline
+        email_utils.send_email(subject, cliente.correo, html_body, logo_path=logo_path)
 
         return {"mensaje": "Depósito realizado exitosamente", "transaccion": transaccion}
 
@@ -117,13 +152,48 @@ def create_transaccion(
         db.commit()
 
         cliente = db.query(models.Cliente).filter_by(idCliente=cuenta_origen.idCliente).first()
-        email_utils.send_email(
-            "Notificación de Retiro - Banco M&R",
-            cliente.correo,
-            f"Hola {cliente.primerNombre}, se ha realizado un retiro de Q{monto} en su cuenta {cuenta_origen.numeroCuenta}.\nDocumento: {numero_documento}"
-        )
 
-        return {"mensaje": "Retiro realizado exitosamente", "transaccion": transaccion}
+        subject = "Banco M&R – Confirmación de Retiro"
+        html_body = f"""
+        <html>
+          <body style="font-family:Arial,sans-serif; color:#333;">
+            <p>Estimado/a <strong>{cliente.primerNombre} {cliente.primerApellido}</strong>,</p>
+
+            <p>
+              Le informamos que su cuenta <strong>{cuenta_origen.numeroCuenta}</strong> ha realizado correctamente
+              un retiro por un monto de <strong>Q{monto:,.2f}</strong>.
+            </p>
+
+            <p>
+              <strong>Detalle de la transacción:</strong><br>
+              • Fecha y hora: {datetime.now().strftime('%d/%m/%Y %H:%M')}<br>
+              • Número de documento: <strong>{numero_documento}</strong>
+            </p>
+
+            <p>
+              Agradecemos su confianza en Banco M&amp;R. Si tiene alguna pregunta, no dude en responder a este correo
+              o contactarse con nuestro equipo de atención al cliente.
+            </p>
+
+            <br>
+            <p>Atentamente,<br>Equipo Banco M&amp;R</p>
+
+            <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+
+            <div style="text-align:center;">
+              <img src="cid:logo_cid" alt="Logo Banco M&R" style="width:120px;"/>
+            </div>
+          </body>
+        </html>
+        """
+
+        # Construye la ruta al logo (ajústala si tu Logo.png está en otra carpeta)
+        logo_path = os.path.join(os.path.dirname(__file__), "..", "Logo.png")
+
+        # Envía el correo en HTML con logo inline
+        email_utils.send_email(subject, cliente.correo, html_body, logo_path=logo_path)
+
+        return {"mensaje": "Depósito realizado exitosamente", "transaccion": transaccion}
 
 
     elif transaccion_data.idTipoTransaccion == 3:  # Transferencia
@@ -221,27 +291,94 @@ def create_transaccion(
         cliente_origen = db.query(models.Cliente).filter_by(idCliente=cuenta_origen.idCliente).first()
         cliente_destino = db.query(models.Cliente).filter_by(idCliente=cuenta_destino.idCliente).first()
 
-        email_utils.send_email(
-            "Transferencia enviada - Banco M&R",
-            cliente_origen.correo,
-            f"Hola {cliente_origen.primerNombre}, has enviado Q{monto} desde tu cuenta {cuenta_origen.numeroCuenta}.\nDocumento: {numero_documento}"
-        )
-        email_utils.send_email(
-            "Transferencia recibida - Banco M&R",
-            cliente_destino.correo,
-            f"Hola {cliente_destino.primerNombre}, has recibido Q{monto_convertido} en tu cuenta {cuenta_destino.numeroCuenta}.\nDocumento: {numero_documento}"
-        )
+        now_local = datetime.now().strftime("%d/%m/%Y %H:%M")
+
+        # 1) Correo para el emisor
+        subject_enviado = "Banco M&R – Confirmación de Transferencia Enviada"
+        html_enviado = f"""
+        <html>
+          <body style="font-family:Arial,sans-serif; color:#333;">
+            <p>Estimado/a <strong>{cliente_origen.primerNombre} {cliente_origen.primerApellido}</strong>,</p>
+
+            <p>
+              Su transferencia ha sido procesada con éxito. A continuación, los detalles de la operación:
+            </p>
+
+            <ul>
+              <li><strong>Fecha y hora:</strong> {now_local}</li>
+              <li><strong>Monto enviado:</strong> Q{monto:,.2f}</li>
+              <li><strong>Cuenta origen:</strong> {cuenta_origen.numeroCuenta}</li>
+              <li><strong>Cuenta destino:</strong> {cuenta_destino.numeroCuenta}</li>
+              <li><strong>Documento:</strong> {numero_documento}</li>
+            </ul>
+
+            <p>
+              Si usted no reconoce esta operación, por favor contáctenos de inmediato.
+            </p>
+
+            <br>
+            <p>Atentamente,<br>Equipo Banco M&amp;R</p>
+
+            <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+
+            <div style="text-align:center;">
+              <img src="cid:logo_cid" alt="Logo Banco M&R" style="width:120px;"/>
+            </div>
+          </body>
+        </html>
+        """
+
+        # 2) Correo para el receptor
+        subject_recibido = "Banco M&R – Aviso de Transferencia Recibida"
+        html_recibido = f"""
+        <html>
+          <body style="font-family:Arial,sans-serif; color:#333;">
+            <p>Estimado/a <strong>{cliente_destino.primerNombre} {cliente_destino.primerApellido}</strong>,</p>
+
+            <p>
+              Se ha acreditado en su cuenta el siguiente importe:
+            </p>
+
+            <ul>
+              <li><strong>Fecha y hora:</strong> {now_local}</li>
+              <li><strong>Monto recibido:</strong> Q{monto_convertido:,.2f}</li>
+              <li><strong>Cuenta destino:</strong> {cuenta_destino.numeroCuenta}</li>
+              <li><strong>Cuenta origen:</strong> {cuenta_origen.numeroCuenta}</li>
+              <li><strong>Documento:</strong> {numero_documento}</li>
+            </ul>
+
+            <p>
+              Si usted no esperaba este ingreso, por favor comuníquese con nosotros de inmediato.
+            </p>
+
+            <br>
+            <p>Saludos cordiales,<br>Equipo Banco M&amp;R</p>
+
+            <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+
+            <div style="text-align:center;">
+              <img src="cid:logo_cid" alt="Logo Banco M&R" style="width:120px;"/>
+            </div>
+          </body>
+        </html>
+        """
+
+        # Ruta al logo
+        logo_path = os.path.join(os.path.dirname(__file__), "..", "Logo.png")
+
+        # Envío de correos
+        email_utils.send_email(subject_enviado, cliente_origen.correo, html_enviado, logo_path=logo_path)
+        email_utils.send_email(subject_recibido, cliente_destino.correo, html_recibido, logo_path=logo_path)
 
         return {
             "mensaje": "Transferencia realizada exitosamente",
             "numeroDocumento": numero_documento,
-            "fecha": local_dt.isoformat(),  # e.g. "2025-05-15T23:07:44-06:00"
+            "fecha": local_dt.isoformat(),
             "saldoOrigenAntes": float(saldo_origen_antes),
             "saldoOrigenDespues": float(saldo_origen_despues),
             "saldoDestinoAntes": float(saldo_destino_antes),
             "saldoDestinoDespues": float(saldo_destino_despues),
         }
-
     raise HTTPException(status_code=400, detail="Tipo de transacción no válido")
 
 
