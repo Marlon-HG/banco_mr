@@ -529,6 +529,85 @@ def listar_prestamos_filtrados(
     ]
 
 
+@router.get(
+    "/prestamos/todos",
+    response_model=List[schemas.PrestamoOut],
+    summary="Lista todos los préstamos (solo admin)",
+)
+def listar_todos_prestamos(
+    numero_prestamo: Optional[str]     = Query(None, description="Filtrar por fragmento de número de préstamo"),
+    estado:         Optional[str]     = Query(None, regex="^(APROBADO|PENDIENTE)$", description="Filtrar por estado"),
+    id_tipo_prestamo: Optional[int]   = Query(None, description="Filtrar por tipo de préstamo"),
+    id_institucion:  Optional[int]   = Query(None, description="Filtrar por institución"),
+    fecha_inicio:    Optional[date]  = Query(None, description="Filtrar préstamos a partir de esta fecha"),
+    fecha_fin:       Optional[date]  = Query(None, description="Filtrar préstamos hasta esta fecha"),
+    db:              Session         = Depends(get_db),
+    current_user:    dict            = Depends(get_current_user),
+):
+    # 1) Solo admin puede usar
+    usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
+    if not usuario or usuario.rol != "admin":
+        raise HTTPException(status_code=403, detail="Solo administradores pueden ver todos los préstamos")
+
+    # 2) Preparamos query base (sin filtrar por cliente)
+    q = (
+        db.query(models.PrestamoEncabezado)
+          .options(
+              joinedload(models.PrestamoEncabezado.institucion),
+              joinedload(models.PrestamoEncabezado.tipoPrestamo),
+              joinedload(models.PrestamoEncabezado.plazo),
+              joinedload(models.PrestamoEncabezado.moneda),
+              joinedload(models.PrestamoEncabezado.cuentaDestino),
+          )
+    )
+
+    # 3) Aplicar filtros si vienen
+    if numero_prestamo:
+        q = q.filter(models.PrestamoEncabezado.numeroPrestamo.ilike(f"%{numero_prestamo}%"))
+    if estado == "APROBADO":
+        q = q.filter(models.PrestamoEncabezado.fechaAutorizacion.isnot(None))
+    elif estado == "PENDIENTE":
+        q = q.filter(models.PrestamoEncabezado.fechaAutorizacion.is_(None))
+    if id_tipo_prestamo:
+        q = q.filter(models.PrestamoEncabezado.idTipoPrestamo == id_tipo_prestamo)
+    if id_institucion:
+        q = q.filter(models.PrestamoEncabezado.idInstitucion == id_institucion)
+    if fecha_inicio:
+        q = q.filter(models.PrestamoEncabezado.fechaPrestamo >= fecha_inicio)
+    if fecha_fin:
+        q = q.filter(models.PrestamoEncabezado.fechaPrestamo <= fecha_fin)
+
+    prestamos = q.order_by(models.PrestamoEncabezado.fechaPrestamo.desc()).all()
+
+    # 4) Mapear cada préstamo a un dict incluyendo nombre completo y observación
+    resultados = []
+    for p in prestamos:
+        cliente = db.query(models.Cliente).filter_by(idCliente=p.idCliente).first()
+        nombre_completo = " ".join(filter(None, [
+            cliente.primerNombre,
+            cliente.segundoNombre,
+            cliente.primerApellido,
+            cliente.segundoApellido
+        ]))
+        resultados.append({
+            "numeroPrestamo":    p.numeroPrestamo,
+            "fechaPrestamo":     p.fechaPrestamo,
+            "fechaAutorizacion": p.fechaAutorizacion,
+            "fechaVencimiento":  p.fechaVencimiento,
+            "montoPrestamo":     float(p.montoPrestamo),
+            "saldoPrestamo":     float(p.saldoPrestamo),
+            "institucion":       p.institucion.descripcion,
+            "tipoPrestamo":      p.tipoPrestamo.descripcion,
+            "moneda":            p.moneda.nombre,
+            "plazo":             p.plazo.descripcion,
+            "cuentaDestino":     p.cuentaDestino.numeroCuenta,
+            "estado":            "APROBADO" if p.fechaAutorizacion else "PENDIENTE",
+            "nombreCliente":     nombre_completo,
+            "observacion":       p.observacion,
+        })
+
+    return resultados
+
 @router.get("/prestamos/mis-pagos", response_model=List[schemas.PagoPrestamoOut])
 def listar_pagos_cliente(
     db: Session = Depends(get_db), current_user: dict = Depends(get_current_user)
