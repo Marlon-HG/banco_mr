@@ -18,9 +18,9 @@ from app.utils import (
     generar_numero_documento_pago,
 )
 from app.email_utils import send_email
-
+import logging
 router = APIRouter()
-
+logger = logging.getLogger("banco_mr.prestamo")
 
 @router.post("/prestamos/solicitar")
 def solicitar_prestamo(
@@ -28,34 +28,38 @@ def solicitar_prestamo(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
+    # 1) Validar que sea cliente
     usuario = db.query(models.Usuario).filter_by(username=user["username"]).first()
     if not usuario or usuario.rol != "cliente":
-        raise HTTPException(403, "Acceso denegado")
+        raise HTTPException(status_code=403, detail="Acceso denegado")
 
+    # 2) Validar cuenta destino
     cuenta = (
         db.query(models.Cuenta)
-        .filter_by(numeroCuenta=data.numeroCuentaDestino, idCliente=usuario.idCliente)
-        .first()
+          .filter_by(numeroCuenta=data.numeroCuentaDestino, idCliente=usuario.idCliente)
+          .first()
     )
     if not cuenta:
-        raise HTTPException(404, "Número de cuenta inválido o no pertenece al cliente")
+        raise HTTPException(status_code=404, detail="Número de cuenta inválido o no pertenece al cliente")
 
+    # 3) Validar plazo
     plazo = db.query(models.Plazo).filter_by(idPlazo=data.idPlazo).first()
     if not plazo:
-        raise HTTPException(404, "Plazo no válido")
+        raise HTTPException(status_code=404, detail="Plazo no válido")
 
+    # 4) Generar encabezado del préstamo
     numero_prestamo = generar_numero_prestamo(db)
-    fecha_actual = date.today()
-    fecha_vencimiento = fecha_actual + relativedelta(months=plazo.cantidadCuotas)
+    fecha_solicitud = date.today()
+    fecha_vencimiento = fecha_solicitud + relativedelta(months=plazo.cantidadCuotas)
 
-    nuevo = models.PrestamoEncabezado(
+    prestamo = models.PrestamoEncabezado(
         idCliente=usuario.idCliente,
         idInstitucion=data.idInstitucion,
         idTipoPrestamo=data.idTipoPrestamo,
         idPlazo=data.idPlazo,
         idMoneda=data.idMoneda,
         numeroPrestamo=numero_prestamo,
-        fechaPrestamo=fecha_actual,
+        fechaPrestamo=fecha_solicitud,
         montoPrestamo=data.montoPrestamo,
         saldoPrestamo=data.montoPrestamo,
         fechaAutorizacion=None,
@@ -63,77 +67,72 @@ def solicitar_prestamo(
         observacion=data.observacion,
         idCuentaDestino=cuenta.idCuenta,
     )
-    db.add(nuevo)
-    db.flush()
+    db.add(prestamo)
+    db.flush()  # <-- asegura que prestamo.idPrestamoEnc ya está disponible
 
+    # 5) Generar e insertar las cuotas
     cuotas = generar_cuotas_sistema_frances(
         monto_prestamo=Decimal(data.montoPrestamo),
         interes_anual=float(plazo.porcentajeAnualIntereses),
         numero_cuotas=plazo.cantidadCuotas,
-        fecha_inicio=fecha_actual + relativedelta(months=1),
+        fecha_inicio=fecha_solicitud + relativedelta(months=1),
     )
-    for c in cuotas:
-        db.add(
-            models.PrestamoDetalle(
-                idPrestamoEnc=nuevo.idPrestamoEnc,
-                numeroCuota=c["numeroCuota"],
-                fechaPago=c["fechaPago"],
-                montoCapital=c["montoCapital"],
-                montoIntereses=c["montoIntereses"],
-                totalAPagar=c["totalAPagar"],
-            )
+    logger.info(f"Se generaron {len(cuotas)} cuotas para el préstamo {numero_prestamo}")
+
+    if not cuotas:
+        # Si no hay cuotas, abortamos la creación
+        raise HTTPException(status_code=500, detail="Error interno: no se pudieron generar las cuotas")
+
+    for cuota in cuotas:
+        detalle = models.PrestamoDetalle(
+            idPrestamoEnc=prestamo.idPrestamoEnc,
+            numeroCuota=cuota["numeroCuota"],
+            fechaPago=cuota["fechaPago"],
+            montoCapital=cuota["montoCapital"],
+            montoIntereses=cuota["montoIntereses"],
+            totalAPagar=cuota["totalAPagar"],
+            estado="VIGENTE",
         )
+        db.add(detalle)
+
+    # 6) Commit único al final
     db.commit()
 
+    # 7) Enviar correo de confirmación (opcionalmente puedes refrescar prestamo para acceder a detalles)
     cliente = db.query(models.Cliente).filter_by(idCliente=usuario.idCliente).first()
     if cliente and cliente.correo:
         try:
-            subject = "Banco M&R – Confirmación de solicitud de préstamo"
+            subject = "Banco M&R – Solicitud de Préstamo Recibida"
             html_body = f"""
-                <html>
-                  <body style="font-family:Arial,sans-serif; color:#333;">
-                    <p>Estimado/a <strong>{cliente.primerNombre} {cliente.primerApellido}</strong>,</p>
+            <html>
+              <body style="font-family:Arial,sans-serif; color:#333;">
+                <p>Estimado/a <strong>{cliente.primerNombre} {cliente.primerApellido}</strong>,</p>
+                <p>Hemos recibido su solicitud de préstamo <strong>{numero_prestamo}</strong> por un monto de <strong>Q{float(data.montoPrestamo):,.2f}</strong>.</p>
                 <p>
-                  Le confirmamos que hemos recibido su solicitud de préstamo con número:<br>
-                  <strong>{numero_prestamo}</strong>
+                  - Fecha de solicitud: {fecha_solicitud.strftime('%d/%m/%Y')}<br>
+                  - Plazo: {plazo.cantidadCuotas} cuotas ({plazo.descripcion})<br>
+                  - Fecha estimada de vencimiento: {fecha_vencimiento.strftime('%d/%m/%Y')}
                 </p>
-                <p>Detalles de la solicitud:</p>
-                <ul>
-                  <li><strong>Fecha de solicitud:</strong> {fecha_actual.strftime('%d/%m/%Y')}</li>
-                  <li><strong>Monto solicitado:</strong> Q{float(data.montoPrestamo):,.2f}</li>
-                  <li><strong>Plazo:</strong> {plazo.descripcion} ({plazo.cantidadCuotas} cuotas)</li>
-                  <li><strong>Vencimiento estimado:</strong> {fecha_vencimiento.strftime('%d/%m/%Y')}</li>
-                </ul>
-                <p>
-                  Actualmente su solicitud está en estado <strong>PENDIENTE</strong> de aprobación.
-                  Le notificaremos en cuanto se procese.
-                </p>
-                <p>
-                  Para consultas, responda a este correo o contáctenos a través de nuestros canales de atención.
-                </p>
+                <p>Su solicitud está <strong>PENDIENTE</strong> de aprobación. Le notificaremos tan pronto como se procese.</p>
                 <br>
-                <p>Saludos cordiales,<br>Equipo de Banco M&amp;R</p>
-                    <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
-                    <div style="text-align:center;">
-                      <!-- Referencia al CID del logo -->
-                      <img
-                        src="cid:logo_cid"
-                        alt="Logo Banco M&R"
-                        style="width:120px;"
-                      />
-                    </div>
-                  </body>
-                </html>
-                """
-            # Construye la ruta absoluta al logo en tu proyecto
+                <p>Saludos cordiales,<br>Equipo Banco M&amp;R</p>
+                <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+                <div style="text-align:center;">
+                  <img src="cid:logo_cid" alt="Banco M&R" style="width:120px;"/>
+                </div>
+              </body>
+            </html>
+            """
             logo_path = os.path.join(os.path.dirname(__file__), "..", "Logo.png")
             send_email(subject, cliente.correo, html_body, logo_path=logo_path)
         except Exception:
             pass
 
-
-    return {"mensaje": "Solicitud de préstamo registrada y cuotas generadas.", "numeroPrestamo": numero_prestamo}
-
+    return {
+        "mensaje": "Solicitud de préstamo registrada y cuotas generadas.",
+        "numeroPrestamo": numero_prestamo,
+        "totalCuotas": len(cuotas)
+    }
 
 @router.post("/prestamos/aprobar")
 def aprobar_prestamo(
@@ -197,29 +196,31 @@ def pagar_prestamo(
     db: Session = Depends(get_db),
     user: dict = Depends(get_current_user),
 ):
-    # 1) Validar cliente y préstamo
+    # 1) Validar cliente y rol
     usuario = db.query(models.Usuario).filter_by(username=user["username"]).first()
     if not usuario or usuario.rol != "cliente":
-        raise HTTPException(403, "Acceso denegado")
+        raise HTTPException(status_code=403, detail="Acceso denegado")
 
+    # 2) Buscar y validar préstamo
     prestamo = db.query(models.PrestamoEncabezado).filter_by(
         numeroPrestamo=data.numeroPrestamo
     ).first()
     if not prestamo or prestamo.fechaAutorizacion is None:
-        raise HTTPException(404, "Préstamo no válido o no aprobado")
+        raise HTTPException(status_code=404, detail="Préstamo no válido o no aprobado")
 
-    # 2) Validar cuenta y saldo
+    # 3) Buscar y validar cuenta origen
     cuenta = db.query(models.Cuenta).filter_by(
-        numeroCuenta=data.numeroCuentaOrigen, idCliente=usuario.idCliente
+        numeroCuenta=data.numeroCuentaOrigen,
+        idCliente=usuario.idCliente
     ).first()
     if not cuenta:
-        raise HTTPException(404, "Cuenta inválida o no pertenece al cliente")
+        raise HTTPException(status_code=404, detail="Cuenta inválida o no pertenece al cliente")
 
     monto_disp = Decimal(str(data.montoPago))
     if cuenta.saldo < monto_disp:
-        raise HTTPException(400, "Saldo insuficiente")
+        raise HTTPException(status_code=400, detail="Saldo insuficiente")
 
-    # 3) Obtener cuotas vigentes, ordenadas por número de cuota
+    # 4) Obtener todas las cuotas VIGENTES ordenadas
     cuotas = (
         db.query(models.PrestamoDetalle)
           .filter_by(idPrestamoEnc=prestamo.idPrestamoEnc, estado="VIGENTE")
@@ -227,17 +228,17 @@ def pagar_prestamo(
           .all()
     )
     if not cuotas:
-        raise HTTPException(400, "No hay cuotas pendientes")
+        raise HTTPException(status_code=400, detail="No hay cuotas pendientes")
 
-    # 4) Crear encabezado de movimiento de pago
+    # 5) Crear encabezado de movimiento de pago
     doc_pago = generar_numero_documento_pago(db)
     fecha_hoy = date.today()
     mov_enc = models.MovimientoPagoEncabezado(
         documentoPago=doc_pago,
         fechaPago=fecha_hoy,
         idPrestamoEnc=prestamo.idPrestamoEnc,
-        idFormaPago=1,  # Ajusta según tu lógica
-        cantidadCuotasPaga=0,  # se irá actualizando
+        idFormaPago=1,
+        cantidadCuotasPaga=0,
         descripcionPago=f"Pago préstamo {data.numeroPrestamo}",
         pagoMontoCapital=Decimal("0.00"),
         pagoMontoInteres=Decimal("0.00"),
@@ -248,40 +249,40 @@ def pagar_prestamo(
     db.add(mov_enc)
     db.flush()  # para obtener mov_enc.idMovimientoEnc
 
-    # 5) Iterar cuota a cuota, aplicando hasta agotar monto_disp
-    total_capital, total_interes, total_mora = Decimal("0.00"), Decimal("0.00"), Decimal("0.00")
+    # 6) Aplicar el pago cuota a cuota
+    total_capital = total_interes = total_mora = Decimal("0.00")
     cuotas_pagadas = 0
+    restante_pago = monto_disp
 
     for cuota in cuotas:
-        if monto_disp <= 0:
+        if restante_pago <= 0:
             break
 
         total_cuota = cuota.totalAPagar
 
-        if monto_disp >= total_cuota:
-            # pago completo de esta cuota
-            pago_cap = cuota.montoCapital
+        if restante_pago >= total_cuota:
+            # Pago completo de la cuota
             pago_int = cuota.montoIntereses
+            pago_cap = cuota.montoCapital
             pago_mor = Decimal("0.00")
             aplicado = total_cuota
 
             cuota.estado = "CANCELADO"
             cuota.fechaCancelado = fecha_hoy
             cuota.documentoPago = doc_pago
+            detalle_estado = "CANCELADO"
             cuotas_pagadas += 1
         else:
-            # pago parcial de la cuota actual (opcional de permitir)
-            pago_int = min(monto_disp, cuota.montoIntereses)
-            restante = monto_disp - pago_int
-            pago_cap = min(restante, cuota.montoCapital)
+            # Pago parcial de la cuota
+            pago_int = min(restante_pago, cuota.montoIntereses)
+            rem = restante_pago - pago_int
+            pago_cap = min(rem, cuota.montoCapital)
             pago_mor = Decimal("0.00")
             aplicado = pago_int + pago_cap
+            detalle_estado = "VIGENTE"
 
-            # dejamos esta cuota como VIGENTE (o podrías marcar 'PARCIAL' si lo modelas)
-            # cuota.estado = "VIGENTE"
-
-        # insertar detalle
-        detalle = models.MovimientoPagoDetalle(
+        # Insertar detalle de pago
+        db.add(models.MovimientoPagoDetalle(
             idMovimientoPagoEnc=mov_enc.idMovimientoEnc,
             idPrestamoEnc=prestamo.idPrestamoEnc,
             idPrestamoDet=cuota.idPrestamoDet,
@@ -290,19 +291,18 @@ def pagar_prestamo(
             pagoMontoIntereses=pago_int,
             pagoMoraCuota=pago_mor,
             totalPago=aplicado,
-            estado="VIGENTE",
-        )
-        db.add(detalle)
+            estado=detalle_estado,
+        ))
 
-        # acumular y ajustar montos
+        # Acumular totales y ajustar saldos
         total_capital += pago_cap
         total_interes += pago_int
         total_mora += pago_mor
         prestamo.saldoPrestamo -= aplicado
         cuenta.saldo -= aplicado
-        monto_disp -= aplicado
+        restante_pago -= aplicado
 
-    # 6) Actualizar resumen en el encabezado
+    # 7) Actualizar el encabezado con los totales
     mov_enc.cantidadCuotasPaga = cuotas_pagadas
     mov_enc.pagoMontoCapital = total_capital
     mov_enc.pagoMontoInteres = total_interes
@@ -311,6 +311,43 @@ def pagar_prestamo(
 
     db.commit()
 
+    # 8) Enviar correo de confirmación al cliente
+    cliente = db.query(models.Cliente).filter_by(idCliente=usuario.idCliente).first()
+    if cliente and cliente.correo:
+        # Ruta absoluta al logo (ajústala según tu proyecto)
+        logo_path = os.path.join(os.path.dirname(__file__), "..", "Logo.png")
+        subject = f"Banco M&R – Confirmación de Pago de Préstamo {data.numeroPrestamo}"
+        html_body = f"""
+        <html>
+          <body style="font-family:Arial,sans-serif; color:#333;">
+            <p>Estimado/a <strong>{cliente.primerNombre} {cliente.primerApellido}</strong>,</p>
+            <p>Hemos recibido y aplicado su pago del préstamo <strong>{data.numeroPrestamo}</strong> con éxito.</p>
+            <ul>
+              <li><strong>Fecha de pago:</strong> {fecha_hoy.strftime('%d/%m/%Y')}</li>
+              <li><strong>Documento:</strong> {doc_pago}</li>
+              <li><strong>Cuotas pagadas:</strong> {cuotas_pagadas}</li>
+              <li><strong>Capital abonado:</strong> Q{float(total_capital):,.2f}</li>
+              <li><strong>Intereses abonados:</strong> Q{float(total_interes):,.2f}</li>
+              <li><strong>Saldo deudor restante:</strong> Q{float(prestamo.saldoPrestamo):,.2f}</li>
+              <li><strong>Saldo de su cuenta:</strong> Q{float(cuenta.saldo):,.2f}</li>
+            </ul>
+            <p>Gracias por su puntualidad. Si tiene alguna consulta, responda a este correo.</p>
+            <br>
+            <p>Saludos cordiales,<br>Equipo de Banco M&amp;R</p>
+            <hr style="border:none; border-top:1px solid #eee; margin:40px 0;" />
+            <div style="text-align:center;">
+              <img src="cid:logo_cid" alt="Logo Banco M&R" style="width:120px;"/>
+            </div>
+          </body>
+        </html>
+        """
+        try:
+            send_email(subject, cliente.correo, html_body, logo_path=logo_path)
+        except Exception:
+            # No interrumpimos si falla el envío de correo
+            pass
+
+    # 9) Respuesta al cliente de la API
     return {
         "mensaje": "Pago aplicado correctamente",
         "documento": doc_pago,
