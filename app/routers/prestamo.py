@@ -503,20 +503,24 @@ def listar_monedas(db: Session = Depends(get_db)):
 
 @router.get(
     "/prestamos/{numero_prestamo}/cuotas",
-    response_model=List[CuotaOut],
-    summary="Listar todas las cuotas de un préstamo"
+    response_model=List[schemas.CuotaOut],
+    summary="Lista todas las cuotas de un préstamo, opcionalmente filtradas por estado"
 )
 def listar_cuotas_prestamo(
-    numero_prestamo: str = Path(..., description="Número del préstamo"),
+    numero_prestamo: str,
+    estado: Optional[str] = Query(
+        None,
+        description="Filtrar por estado de la cuota (VIGENTE o CANCELADO)",
+        regex="^(VIGENTE|CANCELADO)$"
+    ),
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(get_current_user),
 ):
-    # 1) Verificar rol y usuario
+    # 1) Validar que el usuario sea cliente y dueño del préstamo
     usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
     if not usuario or usuario.rol != "cliente":
         raise HTTPException(status_code=403, detail="Acceso denegado")
 
-    # 2) Obtener el préstamo y comprobar que pertenece al cliente
     prestamo = (
         db.query(models.PrestamoEncabezado)
           .filter_by(numeroPrestamo=numero_prestamo, idCliente=usuario.idCliente)
@@ -525,16 +529,11 @@ def listar_cuotas_prestamo(
     if not prestamo:
         raise HTTPException(status_code=404, detail="Préstamo no encontrado")
 
-    # 3) Listar todas las cuotas de ese préstamo
-    cuotas = (
-        db.query(models.PrestamoDetalle)
-          .filter_by(idPrestamoEnc=prestamo.idPrestamoEnc)
-          .order_by(models.PrestamoDetalle.numeroCuota)
-          .all()
-    )
+    # 2) Construir query de cuotas
+    q = db.query(models.PrestamoDetalle).filter_by(idPrestamoEnc=prestamo.idPrestamoEnc)
+    if estado:
+        q = q.filter(models.PrestamoDetalle.estado == estado)
+    cuotas = q.order_by(models.PrestamoDetalle.numeroCuota).all()
 
-    # 4) Convertir a schema y devolver
-    return [
-        CuotaOut.from_orm(c)
-        for c in cuotas
-    ]
+    # 3) Volcar al schema (asegúrate de que tu CuotaOut tenga `model_config = {"from_attributes": True}`)
+    return [schemas.CuotaOut.from_orm(c) for c in cuotas]
