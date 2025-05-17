@@ -5,7 +5,8 @@ from datetime import date
 from dateutil.relativedelta import relativedelta
 from decimal import Decimal
 from typing import Optional, List
-
+from fastapi import Path
+from app.schemas import CuotaOut
 from app.database import get_db
 from app import models, schemas
 from app.auth import get_current_user
@@ -498,4 +499,42 @@ def listar_monedas(db: Session = Depends(get_db)):
             "simbolo": m.codigo
         }
         for m in monedas
+    ]
+
+@router.get(
+    "/prestamos/{numero_prestamo}/cuotas",
+    response_model=List[CuotaOut],
+    summary="Listar todas las cuotas de un préstamo"
+)
+def listar_cuotas_prestamo(
+    numero_prestamo: str = Path(..., description="Número del préstamo"),
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    # 1) Verificar rol y usuario
+    usuario = db.query(models.Usuario).filter_by(username=current_user["username"]).first()
+    if not usuario or usuario.rol != "cliente":
+        raise HTTPException(status_code=403, detail="Acceso denegado")
+
+    # 2) Obtener el préstamo y comprobar que pertenece al cliente
+    prestamo = (
+        db.query(models.PrestamoEncabezado)
+          .filter_by(numeroPrestamo=numero_prestamo, idCliente=usuario.idCliente)
+          .first()
+    )
+    if not prestamo:
+        raise HTTPException(status_code=404, detail="Préstamo no encontrado")
+
+    # 3) Listar todas las cuotas de ese préstamo
+    cuotas = (
+        db.query(models.PrestamoDetalle)
+          .filter_by(idPrestamoEnc=prestamo.idPrestamoEnc)
+          .order_by(models.PrestamoDetalle.numeroCuota)
+          .all()
+    )
+
+    # 4) Convertir a schema y devolver
+    return [
+        CuotaOut.from_orm(c)
+        for c in cuotas
     ]

@@ -157,3 +157,15 @@ class SoporteCambioEstadoCuenta(BaseModel):
 
 class SoporteCambioPassword(BaseModel):
     nueva_password: str = Field(..., min_length=8, description="Nueva contraseña para el usuario")
+
+class CuotaOut(BaseModel):
+    numeroCuota: int
+    fechaPago: date
+    montoCapital: float
+    montoIntereses: float
+    totalAPagar: float
+    estado: str
+
+    model_config = {
+        "from_attributes": True
+    }
