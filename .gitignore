@@ -1,3 +1,4 @@
+#banco_mr/.gitignore
 .env
 __pycache__/
 *.py[cod]

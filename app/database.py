@@ -1,10 +1,16 @@
 # app/database.py
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '.env'))
+root = Path(__file__).resolve().parents[1]
+load_dotenv(dotenv_path=root / '.env', override=True)
+
+
+print("→ DATABASE_URL tras load:", os.getenv("DATABASE_URL"))
+
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL no definida")
