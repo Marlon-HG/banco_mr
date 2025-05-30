@@ -3,6 +3,8 @@ from sqlalchemy import Column, Date, Numeric, Integer, String, Text, DateTime, F
 from sqlalchemy.sql import func
 from app.database import Base
 from sqlalchemy.orm import relationship
+from sqlalchemy import Enum
+import enum
 
 from datetime import datetime
 
@@ -47,15 +49,23 @@ class PasswordResetToken(Base):
 
 class Cuenta(Base):
     __tablename__ = "bcoma_cuenta"
+
     idCuenta = Column(Integer, primary_key=True, index=True)
     idCliente = Column(Integer, ForeignKey("bcoma_cliente.idCliente"), nullable=False)
     numeroCuenta = Column(String(20), unique=True, nullable=False)
     idTipoCuenta = Column(Integer, nullable=False)
-    saldoInicial = Column(DECIMAL(12,2), default=0.00)
-    saldo = Column(DECIMAL(12,2), default=0.00)
+    saldoInicial = Column(DECIMAL(12, 2), default=0.00)
+    saldo = Column(DECIMAL(12, 2), default=0.00)
     idMoneda = Column(Integer, nullable=False)
     idEstadoCuenta = Column(Integer, nullable=False)
     fechaCreacion = Column(TIMESTAMP, server_default=func.now())
+
+    # Relación 1 cuenta → N tarjetas
+    tarjetas = relationship(
+        "Tarjeta",
+        back_populates="cuenta",
+        cascade="all, delete-orphan"
+    )
 
 class Historial(Base):
     __tablename__ = "bcoma_historial"
@@ -70,7 +80,6 @@ class Historial(Base):
 
     def __repr__(self):
         return f"<Historial(idCorrelativo={self.idCorrelativo}, idCuenta={self.idCuenta}, monto={self.monto}, saldo={self.saldo})>"
-
 
 class Institucion(Base):
     __tablename__ = "pre_institucion"
@@ -128,7 +137,6 @@ class PrestamoEncabezado(Base):
         back_populates="prestamoEncabezado",
         lazy="joined"
     )
-
 
 class TipoTransaccion(Base):
     __tablename__ = "bcoma_tipotransaccion"
@@ -204,4 +212,60 @@ class Transaccion(Base):
     monto = Column(DECIMAL(12, 2), nullable=False)
     descripcion = Column(Text, nullable=True)
 
-    tipoTransaccion = relationship("TipoTransaccion")  # Nueva relación agregada aquí
+    tipoTransaccion = relationship("TipoTransaccion")
+
+# — Enumeraciones para Tarjeta —
+class TipoTarjetaEnum(str, enum.Enum):
+    credito = "credito"
+    debito  = "debito"
+
+class EstadoTarjetaEnum(str, enum.Enum):
+    activa    = "activa"
+    bloqueada = "bloqueada"
+
+class SolicitudEstadoEnum(str, enum.Enum):
+    pendiente             = "pendiente"
+    aprobada              = "aprobada"
+    rechazada             = "rechazada"
+    pendiente_cancelacion = "pendiente_cancelacion"
+    cancelada             = "cancelada"
+
+# — Modelo Tarjeta —
+class Tarjeta(Base):
+    __tablename__ = "bcoma_tarjeta"
+
+    idTarjeta       = Column(Integer, primary_key=True, index=True)
+    numeroTarjeta   = Column(String(16), unique=True, nullable=False, index=True)
+    tipo            = Column(Enum(TipoTarjetaEnum), nullable=False)
+    nombreTitular   = Column(String(100), nullable=False)
+    fechaEmision    = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    fechaExpiracion = Column(Date, nullable=False)
+
+    # estado físico de la tarjeta (activa/bloqueada)
+    estado          = Column(Enum(EstadoTarjetaEnum), nullable=False, default=EstadoTarjetaEnum.activa)
+
+    # estado de la solicitud o ciclo de vida (pendiente/aprobada/etc.)
+    status          = Column(Enum(SolicitudEstadoEnum),
+                             nullable=False,
+                             default=SolicitudEstadoEnum.pendiente)
+
+    limiteCredito   = Column(Numeric(12,2), nullable=True)
+    idCuenta        = Column(Integer,
+                             ForeignKey("bcoma_cuenta.idCuenta"),
+                             nullable=False,
+                             index=True)
+
+    cuenta    = relationship("Cuenta", back_populates="tarjetas")
+    cvv_temps = relationship("CVVTemp", back_populates="tarjeta", cascade="all, delete-orphan")
+
+# — Modelo para CVV temporal —
+class CVVTemp(Base):
+    __tablename__ = "bcoma_cvv_temp"
+
+    idCodigo    = Column(Integer, primary_key=True, index=True)
+    idTarjeta   = Column(Integer, ForeignKey("bcoma_tarjeta.idTarjeta"), nullable=False, index=True)
+    cvv         = Column(String(4), nullable=False)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    expires_at  = Column(DateTime(timezone=True), nullable=False)
+
+    tarjeta = relationship("Tarjeta", back_populates="cvv_temps")

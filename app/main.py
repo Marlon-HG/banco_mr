@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import auth, cuentas, transacciones, prestamo, soporte
+from app.routers import auth, cuentas, transacciones, prestamo, soporte, tarjetas
 
 app = FastAPI(
     title="API Banco - Seguridad y Gestión de Contraseñas",
@@ -25,7 +25,8 @@ app.include_router(auth.router)
 app.include_router(cuentas.router)
 app.include_router(transacciones.router)
 app.include_router(prestamo.router)
-app.include_router(soporte.router)   # <-- módulo de soporte
+app.include_router(soporte.router)
+app.include_router(tarjetas.router)
 
 @app.get("/")
 def read_root():

@@ -1,8 +1,9 @@
 #app/schemas.py
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, List
+from typing import Optional, List, Literal
 from datetime import datetime, date
 from decimal import Decimal
+
 
 # Para registro del cliente (datos personales)
 class ClienteCreate(BaseModel):
@@ -180,3 +181,58 @@ class CuotaOut(BaseModel):
         "from_attributes": True
     }
 
+class TarjetaCreate(BaseModel):
+    idCuenta: int
+    tipo: Literal["credito", "debito"]
+    nombreTitular: str
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "idCuenta": 1,
+                "tipo": "debito",
+                "nombreTitular": "Marlon Hernández"
+            }
+        }
+
+
+class CVVOut(BaseModel):
+    cvv: str
+    expires_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+class TarjetaOut(BaseModel):
+    idTarjeta: int
+    numeroTarjeta: str
+    tipo: str
+    nombreTitular: str
+    fechaEmision: datetime
+    fechaExpiracion: Optional[date] = None
+    estado: str
+    status: str                # ← has de tener este campo
+    limiteCredito: Optional[float] = None
+    cvv: Optional[str] = None
+    cvv_expires_at: Optional[datetime] = None
+
+    class Config:
+        orm_mode = True
+
+
+class TarjetaBlockOut(BaseModel):
+    idTarjeta: int
+    estado: str
+
+    class Config:
+        orm_mode = True
+
+
+class TarjetaAprobacion(BaseModel):
+    limiteCredito: float = Field(..., gt=0, description="Límite de crédito aprobado por el banco")
+
+    class Config:
+        schema_extra = {
+            "example": { "limiteCredito": 10000.00 }
+        }
